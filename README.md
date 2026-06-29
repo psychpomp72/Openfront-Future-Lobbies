@@ -1,4 +1,4 @@
-Openfront.io Lobbies
+Openfront.io Lobbies,
 This script requires Tampermonkey
 
 Parts of this code is part of Project Blon.

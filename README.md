@@ -3,18 +3,48 @@ This script requires Tampermonkey
 
 https://www.tampermonkey.net
 
-
-Parts of this code is part of Project Blon.
-All macros have been removed
-
-To install this script, 
+**To install this script**
   - download Openfront Lobbies.txt version
   - Tampermonkey Utlities
   - Import from file
   - Install
 
+----------------------
 
+**Different Versions**
 
+Psychpomp Version
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f8d58287-78f9-4517-8928-c82e37d4b8d2" />
+
+-clicking the map also copies the link
+
+----------------------
+
+Normal Version
+<img width="981" height="766" alt="image" src="https://github.com/user-attachments/assets/7fa02575-93dc-4ea9-b27f-a8eae4ba712a" />
+
+----------------------
+
+Expieremental Version
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e9800936-a351-4947-9076-ece9bc409f26" />
+
+**-this version is slower compared to the other 2 versions**
+
+-removed the bottom bar
+
+-moved buttons to the right
+
+-removed help button
+
+-seperates the teams and ffa
+
+----------------------
+
+**
+---DO NOT USE THE SEZIURES VERSION---
+**
+
+----------------------
 
 This script does
   - Adds future lobbies on front page
@@ -28,6 +58,6 @@ This script does NOT
   - use cookies
   - read clipboard
 
-    ---DO NOT USE THE SEZIURES VERSION---
+----------------------
 
 Say hi to blon if you see him. tell him his hair is nice or something

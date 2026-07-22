@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Openfront Lobbies | Expieremental Version
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Openfront Future Lobbies
 // @author       psychpomp
 // @match        *://openfront.io/
@@ -20,9 +20,16 @@
     let lobbyLatestPayload = null;
     let payloadReceivedAt = Date.now();
 
-    // --- Path Checker ---
+// --- Path Checker ---
     function isAllowedPage() {
         const path = window.location.pathname;
+        const hash = window.location.hash;
+
+        // Hide the custom UI if a modal is open in the URL hash
+        if (hash.includes('modal=ranked') || hash.includes('modal=single-player') || hash.includes('modal=')) {
+            return false;
+        }
+
         return path === '/' || path === '' || path.startsWith('/lobbies');
     }
 

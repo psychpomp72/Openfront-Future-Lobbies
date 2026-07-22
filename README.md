@@ -13,15 +13,17 @@ https://www.tampermonkey.net
 
 **Different Versions**
 
+
+Normal Version
+<img width="981" height="766" alt="image" src="https://github.com/user-attachments/assets/7fa02575-93dc-4ea9-b27f-a8eae4ba712a" />
+
+----------------------
+
 Psychpomp Version
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f8d58287-78f9-4517-8928-c82e37d4b8d2" />
 
 -clicking the map also copies the link
 
-----------------------
-
-Normal Version
-<img width="981" height="766" alt="image" src="https://github.com/user-attachments/assets/7fa02575-93dc-4ea9-b27f-a8eae4ba712a" />
 
 ----------------------
 

@@ -8,7 +8,8 @@ https://www.tampermonkey.net
   - Tampermonkey Utlities
   - Import from file
   - Install
-
+  - Make sure user scripts are enabled
+    
 ----------------------
 
 **Different Versions**

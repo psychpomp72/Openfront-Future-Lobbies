@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Openfront Lobbies | Expieremental Version
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Openfront Future Lobbies
+// @version      1.2
+// @description  Openfront Lobby expierement Version
 // @author       psychpomp
 // @match        *://openfront.io/
 // @match        *://www.openfront.io/
@@ -20,7 +20,7 @@
     let lobbyLatestPayload = null;
     let payloadReceivedAt = Date.now();
 
-// --- Path Checker ---
+    // --- Path Checker ---
     function isAllowedPage() {
         const path = window.location.pathname;
         const hash = window.location.hash;
@@ -208,7 +208,7 @@
             div.grid[class*="sm:grid-cols-[2fr_1fr]"] { display: none !important; }
             footer { display: none !important; }
             a[href="/help"], a[href*="/help"], a[href="/news"], a[href*="/news"] { display: none !important; }
-            #hamburger-btn { display: none !important; } /* Targeted exactly by ID */
+            #hamburger-btn { display: none !important; }
 
             /* FORCE HIDE MOBILE ELEMENTS ON DESKTOP */
             .md\\:hidden, .lg\\:hidden { display: none !important; }
@@ -263,16 +263,15 @@
             .blon-btn-solo   { order: 3 !important; min-height: 50px !important; }
             .blon-btn-join   { order: 4 !important; min-height: 50px !important; }
 
-            /* --- FULL SIZE 3x2 GRID SIDE PANEL --- */
+            /* --- FIXED STRUCTURE 50/50 SPLIT SIDE PANEL --- */
             #blon-side-lobbies {
                 position: fixed;
                 top: 120px;
                 right: 20px;
                 width: calc(100vw - 400px);
                 max-width: 1500px;
-                height: calc(100vh - 100px);
+                height: calc(100vh - 140px); /* Leave room at the bottom */
                 z-index: 9999;
-                overflow-y: auto;
                 padding: 0;
                 display: flex;
                 flex-direction: column;
@@ -280,22 +279,25 @@
                 border: none !important;
                 box-shadow: none !important;
                 backdrop-filter: none !important;
+                overflow: hidden; /* Prevent the main container from moving/scrolling */
             }
-            #blon-side-lobbies::-webkit-scrollbar { width: 8px; }
-            #blon-side-lobbies::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.7); border-radius: 4px; }
 
             .blon-rows-container {
                 display: flex;
                 flex-direction: column;
                 gap: 10px;
-                min-height: 100%;
+                height: 100%; /* Force container to respect the exact panel height */
+                width: 100%;
             }
+
             .blon-row-section {
                 display: flex;
                 flex-direction: column;
                 width: 100%;
-                flex: 1;
+                height: 50%; /* Lock each section to EXACTLY half the screen vertically */
+                min-height: 0; /* Prevents flex-children from expanding the section */
             }
+
             .blon-row-title {
                 color: #f8fafc;
                 font-size: 16px;
@@ -306,24 +308,45 @@
                 border-bottom: 2px dashed rgba(255,255,255,0.2);
                 margin-bottom: 16px;
                 text-shadow: 0 2px 5px rgba(0,0,0,0.8);
+                flex-shrink: 0; /* Prevent the title from shrinking */
             }
 
-            /* 3 COLUMN GRID */
+            /* --- AUTO-WRAPPING FLEX LAYOUT --- */
             .blon-row-cards {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
+                display: flex;
+                flex-wrap: wrap;
                 gap: 24px;
+                align-content: flex-start; /* Stack newly wrapped cards at the top */
+                flex: 1; /* Consume remaining space in the 50% section */
+                overflow-y: auto; /* Enable internal scrolling if cards overfill their section */
+                padding-bottom: 20px;
             }
 
-            /* --- TALLER CARD DESIGN --- */
+            /* Scrollbars for individual sections if they overflow */
+            .blon-row-cards::-webkit-scrollbar { width: 6px; }
+            .blon-row-cards::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.7); border-radius: 4px; }
+
+            /* Primary Row Card Size (First 3 elements) */
             .blon-side-card {
                 background: transparent;
                 border-radius: 12px;
                 overflow: hidden;
                 border: 1px solid #334155;
                 position: relative;
-                height: 340px;
-                box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+
+                /* Responsive width: Takes exactly 1/3rd of the container */
+                width: calc(33.333% - 16px);
+
+                /* Perfect Aspect Ratio: Shaved down height slightly more (Widescreen format) */
+                aspect-ratio: 16 / 9;
+                height: auto;
+
+                box-shadow: 0 6px 12px rgba(0,0,0,0.4);
+            }
+
+            /* Wrapped Row Card Size (Element 4 and beyond drops to 1/5th width for even smaller cards!) */
+            .blon-side-card:nth-child(n+4) {
+                width: calc(20% - 19.2px);
             }
 
             .blon-side-img-wrapper {
@@ -338,11 +361,12 @@
                 background: #0f172a;
             }
 
+            /* Gradient scales perfectly as the card shrinks */
             .blon-blur-overlay {
                 position: absolute;
                 bottom: 0; left: 0;
                 width: 100%;
-                height: 180px;
+                height: 55%;
                 z-index: 2;
                 backdrop-filter: blur(8px);
                 -webkit-backdrop-filter: blur(8px);
@@ -360,41 +384,37 @@
                 position: absolute;
                 bottom: 0; left: 0;
                 width: 100%;
-                height: 180px;
-                padding: 16px;
-                display: flex; flex-direction: column; justify-content: flex-end; gap: 8px;
+                height: 65%;
+                padding: 12px;
+                display: flex; flex-direction: column; justify-content: flex-end; gap: 6px;
                 box-sizing: border-box;
                 z-index: 3;
             }
 
-            .blon-side-title { color: #f8fafc; font-size: 16px; font-weight: bold; text-transform: uppercase; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
-            .blon-side-mode { color: #cbd5e1; font-size: 12px; text-transform: uppercase; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+            .blon-side-title { color: #f8fafc; font-size: 15px; font-weight: bold; text-transform: uppercase; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+            .blon-side-mode { color: #cbd5e1; font-size: 11px; text-transform: uppercase; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
             .blon-side-modifiers { display: flex; flex-wrap: wrap; gap: 6px; overflow: hidden; }
-            .blon-mod-badge { background: rgba(2, 132, 199, 0.9); color: #fff; font-size: 10px; font-weight: bold; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; box-shadow: 0 2px 4px rgba(0,0,0,0.4); }
+            .blon-mod-badge { background: rgba(2, 132, 199, 0.9); color: #fff; font-size: 9px; font-weight: bold; padding: 4px 6px; border-radius: 4px; text-transform: uppercase; box-shadow: 0 2px 4px rgba(0,0,0,0.4); }
 
+            /* --- SIMPLIFIED JOIN BUTTON (NO FLICKER) --- */
             .blon-join-btn {
                 margin-top: 4px;
                 background: rgba(15, 23, 42, 0.95) !important;
                 color: white;
                 border: 1px solid #334155;
-                padding: 16px 20px;
+                padding: 10px 16px;
                 width: 100%;
-                border-radius: 8px;
-                font-size: 15px;
-                font-weight: 900;
-                letter-spacing: 1px;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 700;
                 cursor: pointer;
                 text-align: center;
                 text-transform: uppercase;
-                transition: all 0.2s ease-in-out;
-                box-shadow: 0 4px 10px rgba(0,0,0,0.5);
             }
 
-            /* BLUE GLOW ON HOVER */
             .blon-join-btn:hover {
-                background: #0f172a !important;
-                border-color: #3b82f6 !important;
-                box-shadow: 0 0 16px rgba(59, 130, 246, 0.8) !important;
+                background: #2563eb !important;
+                border-color: #2563eb !important;
             }
         `;
         document.head.appendChild(style);
@@ -539,6 +559,7 @@
             return at - bt;
         });
 
+        // Setup the Rigid 50/50 container
         panel.innerHTML = `
             <div class="blon-rows-container">
                 <div class="blon-row-section" id="blon-row-team">
@@ -568,19 +589,17 @@
         candidates.forEach(game => {
             const isFFA = game.gameConfig?.gameMode === 'Free For All';
 
-            // LIMIT TO EXACTLY 3 MAPS EACH FOR A 3x2 GRID
-            if (isFFA && ffaCount >= 3) return;
-            if (!isFFA && teamCount >= 3) return;
-
             const mapName = getLobbyMapDisplay(game);
             const thumbUrl = getLobbyMapThumbnailUrl(mapName);
             const modeLabel = getLobbyModeLabel(game);
             const modifiers = getLobbyModifiers(game);
             const maxPlayers = game.gameConfig?.maxPlayers ?? game.numClients ?? '?';
             const numClients = game.numClients ?? 0;
+
             const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
             const timeDelta = startAt - serverTime;
             const timerText = timeDelta <= 0 ? 'Open' : formatDurationCard(timeDelta);
+
             const gameID = game.gameID;
 
             const modHtml = modifiers.map(m => `<span class="blon-mod-badge">${m}</span>`).join('');
@@ -610,10 +629,9 @@
 
                 btn.textContent = 'Copied! Joining...';
 
-                // Keep the glow state active while joining
-                btn.style.setProperty('background', '#0f172a', 'important');
-                btn.style.setProperty('border-color', '#3b82f6', 'important');
-                btn.style.setProperty('box-shadow', '0 0 14px rgba(59, 130, 246, 0.8)', 'important');
+                // Change color immediately on click
+                btn.style.setProperty('background', '#2563eb', 'important');
+                btn.style.setProperty('border-color', '#2563eb', 'important');
 
                 setTimeout(() => {
                     try {
@@ -643,11 +661,12 @@
             }
         });
 
+        // Hide titles if there are absolutely no lobbies for that category
         if (ffaCount === 0) {
-            ffaColumn.insertAdjacentHTML('beforeend', '<div style="color:#f8fafc; font-size:14px; grid-column: 1 / -1; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">No FFA lobbies</div>');
+            panel.querySelector('#blon-row-ffa').style.display = 'none';
         }
         if (teamCount === 0) {
-            teamColumn.insertAdjacentHTML('beforeend', '<div style="color:#f8fafc; font-size:14px; grid-column: 1 / -1; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">No Team lobbies</div>');
+            panel.querySelector('#blon-row-team').style.display = 'none';
         }
     }
 

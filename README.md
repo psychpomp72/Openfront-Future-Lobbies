@@ -29,7 +29,8 @@ Psychpomp Version
 ----------------------
 
 Expieremental Version
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e9800936-a351-4947-9076-ece9bc409f26" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/cff9619d-ddf6-4364-be86-219193e359ca" />
+
 
 **-this version is slower compared to the other 2 versions**
 

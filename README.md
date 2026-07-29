@@ -21,7 +21,8 @@ Normal Version
 ----------------------
 
 Psychpomp Version
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f8d58287-78f9-4517-8928-c82e37d4b8d2" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f2c95ef1-d9cf-420c-baba-5cd8ec911f49" />
+
 
 -clicking the map also copies the link
 

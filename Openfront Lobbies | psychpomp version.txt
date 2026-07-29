@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Openfront Future Lobbies Grid
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Future Lobbies | all the code is stolen from Blon. Say hi to Blon if you see him in the wild.
+// @version      1.3
+// @description  Future Lobbies for Openfront.io
 // @author       psychpomp
 // @match        *://openfront.io/*
 // @match        *://*.openfront.io/*
@@ -17,6 +17,8 @@
     let lobbyReconnectTimeout = null;
     let lobbyShouldReconnect = true;
     let lobbyLatestPayload = null;
+    let localTimeAtLastPayload = 0;
+    let uiUpdateInterval = null;
 
     // --- Core URL & Worker Helpers ---
     function getNumWorkers() {
@@ -96,7 +98,7 @@
     }
 
     function formatDurationCard(ms) {
-        if (ms <= 0) return 'Now';
+        if (ms <= 0) return 'Open';
         const totalSec = Math.ceil(ms / 1000);
         const minutes = Math.floor(totalSec / 60);
         const seconds = totalSec % 60;
@@ -193,8 +195,7 @@
         const numClients = game.numClients ?? 0;
         const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
         const timeDelta = startAt - serverTime;
-        const isLive = timeDelta <= 0;
-        const timerText = isLive ? 'Open' : formatDurationCard(timeDelta);
+        const timerText = formatDurationCard(timeDelta);
         const gameID = game.gameID;
 
         const badgesHtml = modifiers.slice(0, 2).map(m =>
@@ -216,7 +217,7 @@
         </div>
         <div class="absolute inset-x-2 top-2 flex items-start justify-between gap-2">
           ${modifiersHtml}
-          ${!isLive ? `<div class="shrink-0"><span class="text-xs font-bold tracking-widest normal-case bg-malibu-blue text-white px-2 py-1 rounded">${timerText}</span></div>` : '<div></div>'}
+          <div class="shrink-0"><span class="blon-timer text-xs font-bold tracking-widest normal-case bg-malibu-blue text-white px-2 py-1 rounded">${timerText}</span></div>
         </div>
         <div class="absolute bottom-0 left-0 right-0 flex flex-col px-3 py-2 bg-black/55 backdrop-blur-sm rounded-b-2xl" style="overflow:visible;">
           <span class="absolute bottom-full right-2 mb-1 flex items-center gap-1 text-xs font-bold tracking-widest bg-black/70 backdrop-blur-sm px-2 py-0.5 rounded">
@@ -241,23 +242,21 @@
             styleEl = document.createElement('style');
             styleEl.id = 'blon-lobby-3x2-grid-css';
             styleEl.textContent = `
+                /* Hide native items completely so our fully sorted injected components take over the grid */
+                div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div:not(.blon-upcoming-slot) {
+                    display: none !important;
+                }
+                .blon-upcoming-slot {
+                    display: block !important;
+                    width: 100%;
+                }
+                .blon-upcoming-slot button {
+                    height: 11rem !important;
+                }
                 @media (min-width: 640px) {
                     div.grid[class*="sm:grid-cols-[2fr_1fr]"] {
                         grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
                         height: auto !important;
-                    }
-                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:block"],
-                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:flex"] {
-                        display: none !important;
-                    }
-                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:hidden"] {
-                        display: block !important;
-                    }
-                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:hidden"] button {
-                        height: 12rem !important;
-                    }
-                    .blon-upcoming-slot {
-                        display: block !important;
                     }
                     .blon-upcoming-slot button {
                         height: 12rem !important;
@@ -269,29 +268,56 @@
 
         if (!lobbyLatestPayload || !lobbyLatestPayload.games) return;
 
-        const serverTime = typeof lobbyLatestPayload.serverTime === 'number' ? lobbyLatestPayload.serverTime : Date.now();
+        // Extrapolate time based on when the last websocket payload arrived to ensure smooth 500ms updates
+        const baseServerTime = typeof lobbyLatestPayload.serverTime === 'number' ? lobbyLatestPayload.serverTime : Date.now();
+        const serverTime = localTimeAtLastPayload ? baseServerTime + (Date.now() - localTimeAtLastPayload) : baseServerTime;
         const allGames = Object.values(lobbyLatestPayload.games).flat();
 
         document.querySelectorAll('div.grid[class*="sm:grid-cols-[2fr_1fr]"]').forEach(grid => {
-            const realCards = Array.from(grid.children).filter(el => el.classList.contains('sm:hidden') || el.className.includes('sm:hidden'));
+
+            // NEW SORTING LOGIC: Teams first, then FFA, then fallback sorted by time
+            const sortedGames = allGames.sort((a, b) => {
+                const getModeWeight = (game) => {
+                    const mode = game.gameConfig?.gameMode;
+                    if (mode === 'Team') return 0; // Teams First
+                    if (mode === 'Free For All') return 1; // FFA Second
+                    return 2; // Others Last
+                };
+
+                const weightA = getModeWeight(a);
+                const weightB = getModeWeight(b);
+
+                // If categories are different, sort by category weight
+                if (weightA !== weightB) {
+                    return weightA - weightB;
+                }
+
+                // If categories are the same, fallback to time sorting
+                const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
+                const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
+                return at - bt;
+            });
+
+            // Grab the top 6 games to perfectly fill out the grid
+            const candidates = sortedGames.slice(0, 6);
+
+            // Soft Update Check: If the exact same games are in the exact same slots, just update the timer text to prevent flicker
+            const newGameIds = candidates.map(g => g.gameID).join(',');
+            const oldGameIds = grid.dataset.blonRenderedIds || '';
+
+            if (newGameIds === oldGameIds) {
+                candidates.forEach((game, index) => {
+                    const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+                    const timeDelta = startAt - serverTime;
+                    const timerEl = grid.querySelectorAll('.blon-timer')[index];
+                    if (timerEl) timerEl.textContent = formatDurationCard(timeDelta);
+                });
+                return; // Skip full DOM rebuild
+            }
+
+            // Hard Update: Lobbies changed, rebuild the DOM
+            grid.dataset.blonRenderedIds = newGameIds;
             const existingFillers = Array.from(grid.querySelectorAll(':scope > .blon-upcoming-slot'));
-            const fillerCount = Math.max(0, 6 - realCards.length);
-            const shownIds = new Set(
-                realCards.map(el => {
-                    const btn = el.querySelector('button[data-blon-gameid]');
-                    return btn ? btn.dataset.blonGameid : null;
-                }).filter(Boolean)
-            );
-
-            const candidates = allGames
-                .filter(g => !shownIds.has(String(g.gameID)))
-                .sort((a, b) => {
-                    const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
-                    const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
-                    return at - bt;
-                })
-                .slice(0, fillerCount);
-
             existingFillers.forEach(el => el.remove());
 
             candidates.forEach(game => {
@@ -307,12 +333,10 @@
                     btn.addEventListener('click', () => {
                         const lobbyId = gameID;
 
-                        // --- NEW: Automatically copy the link to clipboard ---
                         const url = getLobbyUrl(lobbyId);
                         navigator.clipboard.writeText(url).catch(err => {
                             console.error("Auto-copy to clipboard failed:", err);
                         });
-                        // -----------------------------------------------------
 
                         try {
                             if (typeof window.showPage === 'function') window.showPage('page-join-lobby');
@@ -334,7 +358,7 @@
                 const copyBtn = wrapper.querySelector('.blon-copy-btn');
                 if (copyBtn) {
                     copyBtn.addEventListener('click', (e) => {
-                        e.stopPropagation(); // Stop parent button from triggering join event
+                        e.stopPropagation();
                         e.preventDefault();
                         const url = getLobbyUrl(gameID);
                         navigator.clipboard.writeText(url).then(() => {
@@ -356,12 +380,31 @@
         });
     }
 
+    // --- Hide Elements Snippet ---
+    function hideHelpAndNews() {
+        document.querySelectorAll('a, button, span, div').forEach(el => {
+            if (el.children.length === 0 && el.textContent) {
+                const text = el.textContent.trim().toUpperCase();
+                if (text === 'HELP' || text === 'NEWS') {
+                    el.style.display = 'none';
+                }
+                if (text === 'NEWS' && el.classList.length > 0) {
+                    const banner = el.closest('div.rounded-xl') || el.closest('div.bg-surface');
+                    if (banner && banner.clientHeight < 120) {
+                        banner.style.display = 'none';
+                    }
+                }
+            }
+        });
+    }
+
     // --- WebSocket Logic ---
     function handleLobbySocketMessage(event) {
         try {
             const payload = JSON.parse(event.data);
             if (payload && typeof payload.serverTime === 'number' && payload.games) {
                 lobbyLatestPayload = payload;
+                localTimeAtLastPayload = Date.now();
                 updateLobbyGridLayout();
             }
         } catch (e) {
@@ -403,11 +446,21 @@
         }
     }
 
-    // Initialize Feed when document is ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', connectLobbyFeed);
-    } else {
+    // Initialize Feed and Start Update Interval
+    function init() {
         connectLobbyFeed();
+        if (!uiUpdateInterval) {
+            uiUpdateInterval = setInterval(() => {
+                updateLobbyGridLayout();
+                hideHelpAndNews(); // Check and hide banners/help text every 500ms
+            }, 500);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
     }
 
 })();

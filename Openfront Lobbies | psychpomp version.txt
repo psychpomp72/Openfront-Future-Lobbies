@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Openfront Future Lobbies Grid
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Future Lobbies for Openfront.io
+// @version      1.4
+// @description  Updated for v33 | sorts private lobbies last and grayscales them
 // @author       psychpomp
 // @match        *://openfront.io/*
 // @match        *://*.openfront.io/*
@@ -55,6 +55,19 @@
     }
 
     // --- Lobby Data Formatters ---
+    function getMaxPlayers(game) {
+        const candidates = [
+            game.gameConfig?.maxPlayers,
+            game.maxPlayers,
+            game.publicGameModifiers?.maxPlayers
+        ];
+        for (let val of candidates) {
+            const num = Number(val);
+            if (!isNaN(num) && num > 0) return num;
+        }
+        return 0; // 0 indicates unknown or truly unlimited
+    }
+
     function getLobbyModifiers(game) {
         const pm = game.publicGameModifiers || {};
         const gcfg = game.gameConfig || {};
@@ -110,29 +123,27 @@
     function getLobbyModeLabel(game) {
         const cfg = game.gameConfig;
         const mode = cfg && typeof cfg.gameMode === 'string' ? cfg.gameMode : null;
-        const totalPlayers = cfg?.maxPlayers ?? game.numClients ?? undefined;
+
+        const maxP = getMaxPlayers(game);
+        const isUnlimited = (maxP <= 0 || maxP >= 999);
 
         if (mode === 'Free For All') return 'FFA';
         if (mode === 'Team') {
             if (cfg?.playerTeams === 'Humans Vs Nations') {
-                return totalPlayers ? `Humans vs Nations (${totalPlayers} players)` : 'Humans vs Nations';
+                return isUnlimited ? `Humans vs Nations (∞ players)` : `Humans vs Nations (${maxP} players)`;
             }
             const namedTeamSizes = { Duos: 2, Trios: 3, Quads: 4 };
             if (typeof cfg?.playerTeams === 'string' && namedTeamSizes[cfg.playerTeams]) {
                 const playersPerTeam = namedTeamSizes[cfg.playerTeams];
-                if (totalPlayers) {
-                    const teamCount = Math.floor(totalPlayers / playersPerTeam);
-                    return `${cfg.playerTeams} (${teamCount} teams of ${playersPerTeam})`;
-                }
-                return cfg.playerTeams;
+                if (isUnlimited) return `${cfg.playerTeams} (∞ teams of ${playersPerTeam})`;
+                const teamCount = Math.floor(maxP / playersPerTeam);
+                return `${cfg.playerTeams} (${teamCount} teams of ${playersPerTeam})`;
             }
             if (typeof cfg?.playerTeams === 'number' && cfg.playerTeams > 0) {
                 const teamCount = cfg.playerTeams;
-                if (totalPlayers) {
-                    const playersPerTeam = Math.floor(totalPlayers / teamCount);
-                    return `${teamCount} teams of ${playersPerTeam}`;
-                }
-                return `${teamCount} teams`;
+                if (isUnlimited) return `${teamCount} teams of ∞`;
+                const playersPerTeam = Math.floor(maxP / teamCount);
+                return `${teamCount} teams of ${playersPerTeam}`;
             }
             return 'Team';
         }
@@ -191,12 +202,28 @@
         const thumbUrl = getLobbyMapThumbnailUrl(mapName);
         const modeLabel = getLobbyModeLabel(game);
         const modifiers = getLobbyModifiers(game);
-        const maxPlayers = game.gameConfig?.maxPlayers ?? game.numClients ?? '?';
-        const numClients = game.numClients ?? 0;
+
+        const numClients = Number(game.numClients) || 0;
+        const maxP = getMaxPlayers(game);
+
+        // This marks maps with the ∞ symbol
+        const isUnlimited = (maxP <= 0 || maxP >= 999);
+        const maxPlayersDisplay = isUnlimited ? '∞' : maxP;
+
+        // Check if the lobby is maxed out
+        const isFull = !isUnlimited && maxP > 0 && numClients >= maxP;
+
+        // If it has ∞ (Private) OR if it is Full -> Grayscale it
+        const shouldGrayscale = isUnlimited || isFull;
+
         const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
         const timeDelta = startAt - serverTime;
         const timerText = formatDurationCard(timeDelta);
         const gameID = game.gameID;
+
+        // Apply grayscale safely to the main button wrapper
+        const customTailwindClasses = shouldGrayscale ? 'grayscale opacity-75' : '';
+        const customStyle = shouldGrayscale ? 'filter: grayscale(75%) !important;' : '';
 
         const badgesHtml = modifiers.slice(0, 2).map(m =>
             `<span class="px-2 py-1 rounded text-xs font-bold uppercase tracking-widest bg-malibu-blue text-white shadow-[var(--shadow-malibu-blue-pill)]">${m}</span>`
@@ -209,9 +236,10 @@
             ? `<img draggable="false" src="${thumbUrl}" alt="${mapName}" class="absolute inset-0 w-full h-full object-cover object-center scale-[1.05] [image-rendering:auto]">`
             : '';
 
+        // Note: Reverted the HTML structure to pre-2.0 to ensure the native backdrop blur does not break
         return {
             gameID, html: `
-      <button class="group relative w-full h-44 sm:h-full text-white uppercase rounded-2xl transition-all duration-200 active:scale-[0.98] bg-surface hover:shadow-[var(--shadow-lobby-card-hover)] blon-upcoming-card">
+      <button class="group relative w-full h-44 sm:h-full text-white uppercase rounded-2xl transition-all duration-200 active:scale-[0.98] bg-surface hover:shadow-[var(--shadow-lobby-card-hover)] blon-upcoming-card ${customTailwindClasses}" style="${customStyle}">
         <div class="absolute inset-0 rounded-2xl overflow-hidden pointer-events-none">
           ${imgHtml}
         </div>
@@ -221,7 +249,7 @@
         </div>
         <div class="absolute bottom-0 left-0 right-0 flex flex-col px-3 py-2 bg-black/55 backdrop-blur-sm rounded-b-2xl" style="overflow:visible;">
           <span class="absolute bottom-full right-2 mb-1 flex items-center gap-1 text-xs font-bold tracking-widest bg-black/70 backdrop-blur-sm px-2 py-0.5 rounded">
-            ${numClients}/${maxPlayers}
+            ${numClients}/${maxPlayersDisplay}
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline-block" viewBox="0 0 20 20" fill="currentColor">
               <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z"></path>
             </svg>
@@ -268,15 +296,34 @@
 
         if (!lobbyLatestPayload || !lobbyLatestPayload.games) return;
 
-        // Extrapolate time based on when the last websocket payload arrived to ensure smooth 500ms updates
         const baseServerTime = typeof lobbyLatestPayload.serverTime === 'number' ? lobbyLatestPayload.serverTime : Date.now();
         const serverTime = localTimeAtLastPayload ? baseServerTime + (Date.now() - localTimeAtLastPayload) : baseServerTime;
+
         const allGames = Object.values(lobbyLatestPayload.games).flat();
 
         document.querySelectorAll('div.grid[class*="sm:grid-cols-[2fr_1fr]"]').forEach(grid => {
 
-            // NEW SORTING LOGIC: Teams first, then FFA, then fallback sorted by time
-            const sortedGames = allGames.sort((a, b) => {
+            // NEW SORTING LOGIC: (∞ and Full) Bottom -> Teams First -> FFA Second -> Fallback Time
+            const candidates = allGames.sort((a, b) => {
+
+                // Helper to push full OR private(∞) games to the bottom
+                const getBottomWeight = (game) => {
+                    const nc = Number(game.numClients) || 0;
+                    const mp = getMaxPlayers(game);
+                    const isUnlim = (mp <= 0 || mp >= 999);
+                    const isFull = (!isUnlim && nc >= mp);
+                    return (isUnlim || isFull) ? 1 : 0;
+                };
+
+                const bottomA = getBottomWeight(a);
+                const bottomB = getBottomWeight(b);
+
+                // If one should be at the bottom and the other shouldn't (1 > 0)
+                if (bottomA !== bottomB) {
+                    return bottomA - bottomB;
+                }
+
+                // Normal sorting for the rest
                 const getModeWeight = (game) => {
                     const mode = game.gameConfig?.gameMode;
                     if (mode === 'Team') return 0; // Teams First
@@ -287,36 +334,34 @@
                 const weightA = getModeWeight(a);
                 const weightB = getModeWeight(b);
 
-                // If categories are different, sort by category weight
                 if (weightA !== weightB) {
                     return weightA - weightB;
                 }
 
-                // If categories are the same, fallback to time sorting
+                // Fallback to time sorting
                 const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
                 const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
                 return at - bt;
             });
 
-            // Grab the top 6 games to perfectly fill out the grid
-            const candidates = sortedGames.slice(0, 6);
+            // Generate a state signature that includes the ID, current players, and max players.
+            // If someone joins or leaves, the string changes, instantly breaking the soft update cache and forcing a re-render.
+            const newGameStateStr = candidates.map(g => `${g.gameID}-${Number(g.numClients)||0}-${getMaxPlayers(g)}`).join(',');
+            const oldGameStateStr = grid.dataset.blonRenderedIds || '';
 
-            // Soft Update Check: If the exact same games are in the exact same slots, just update the timer text to prevent flicker
-            const newGameIds = candidates.map(g => g.gameID).join(',');
-            const oldGameIds = grid.dataset.blonRenderedIds || '';
-
-            if (newGameIds === oldGameIds) {
+            if (newGameStateStr === oldGameStateStr) {
+                // Soft Update (Nothing changed except time)
                 candidates.forEach((game, index) => {
                     const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
                     const timeDelta = startAt - serverTime;
                     const timerEl = grid.querySelectorAll('.blon-timer')[index];
                     if (timerEl) timerEl.textContent = formatDurationCard(timeDelta);
                 });
-                return; // Skip full DOM rebuild
+                return;
             }
 
-            // Hard Update: Lobbies changed, rebuild the DOM
-            grid.dataset.blonRenderedIds = newGameIds;
+            // Hard Update (Lobby order, fullness, or player counts changed)
+            grid.dataset.blonRenderedIds = newGameStateStr;
             const existingFillers = Array.from(grid.querySelectorAll(':scope > .blon-upcoming-slot'));
             existingFillers.forEach(el => el.remove());
 
@@ -452,7 +497,7 @@
         if (!uiUpdateInterval) {
             uiUpdateInterval = setInterval(() => {
                 updateLobbyGridLayout();
-                hideHelpAndNews(); // Check and hide banners/help text every 500ms
+                hideHelpAndNews();
             }, 500);
         }
     }

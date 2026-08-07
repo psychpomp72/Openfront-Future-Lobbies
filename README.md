@@ -21,11 +21,12 @@ Normal Version
 ----------------------
 
 Psychpomp Version
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f2c95ef1-d9cf-420c-baba-5cd8ec911f49" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/19e80761-af6b-468b-9668-01d319587481" />
+
 
 
 -clicking the map also copies the link
-
+-sorts private lobbies last & grayscales them
 
 ----------------------
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Openfront Future Lobbies Grid
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Updated for v33 | sorts private lobbies last and grayscales them
+// @version      1.5
+// @description  Updated for v33
 // @author       psychpomp
 // @match        *://openfront.io/*
 // @match        *://*.openfront.io/*
@@ -65,7 +65,7 @@
             const num = Number(val);
             if (!isNaN(num) && num > 0) return num;
         }
-        return 0; // 0 indicates unknown or truly unlimited
+        return 0;
     }
 
     function getLobbyModifiers(game) {
@@ -196,7 +196,7 @@
         return 'Unknown';
     }
 
-    // --- UI Generation & Rendering ---
+    // --- Main Grid Card (Default Openfront Style) ---
     function makeUpcomingLobbyCard(game, serverTime) {
         const mapName = getLobbyMapDisplay(game);
         const thumbUrl = getLobbyMapThumbnailUrl(mapName);
@@ -205,25 +205,13 @@
 
         const numClients = Number(game.numClients) || 0;
         const maxP = getMaxPlayers(game);
-
-        // This marks maps with the ∞ symbol
         const isUnlimited = (maxP <= 0 || maxP >= 999);
         const maxPlayersDisplay = isUnlimited ? '∞' : maxP;
-
-        // Check if the lobby is maxed out
-        const isFull = !isUnlimited && maxP > 0 && numClients >= maxP;
-
-        // If it has ∞ (Private) OR if it is Full -> Grayscale it
-        const shouldGrayscale = isUnlimited || isFull;
 
         const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
         const timeDelta = startAt - serverTime;
         const timerText = formatDurationCard(timeDelta);
         const gameID = game.gameID;
-
-        // Apply grayscale safely to the main button wrapper
-        const customTailwindClasses = shouldGrayscale ? 'grayscale opacity-75' : '';
-        const customStyle = shouldGrayscale ? 'filter: grayscale(75%) !important;' : '';
 
         const badgesHtml = modifiers.slice(0, 2).map(m =>
             `<span class="px-2 py-1 rounded text-xs font-bold uppercase tracking-widest bg-malibu-blue text-white shadow-[var(--shadow-malibu-blue-pill)]">${m}</span>`
@@ -236,10 +224,9 @@
             ? `<img draggable="false" src="${thumbUrl}" alt="${mapName}" class="absolute inset-0 w-full h-full object-cover object-center scale-[1.05] [image-rendering:auto]">`
             : '';
 
-        // Note: Reverted the HTML structure to pre-2.0 to ensure the native backdrop blur does not break
         return {
             gameID, html: `
-      <button class="group relative w-full h-44 sm:h-full text-white uppercase rounded-2xl transition-all duration-200 active:scale-[0.98] bg-surface hover:shadow-[var(--shadow-lobby-card-hover)] blon-upcoming-card ${customTailwindClasses}" style="${customStyle}">
+      <button class="group relative w-full h-44 sm:h-full text-white uppercase rounded-2xl transition-all duration-200 active:scale-[0.98] bg-surface hover:shadow-[var(--shadow-lobby-card-hover)] blon-upcoming-card">
         <div class="absolute inset-0 rounded-2xl overflow-hidden pointer-events-none">
           ${imgHtml}
         </div>
@@ -264,13 +251,104 @@
     ` };
     }
 
+    // --- Sidebar List Card (New Layout with Map on Left) ---
+    function makeSidebarListCard(game, serverTime) {
+        const mapName = getLobbyMapDisplay(game);
+        const thumbUrl = getLobbyMapThumbnailUrl(mapName);
+        const modeLabel = getLobbyModeLabel(game);
+
+        const numClients = Number(game.numClients) || 0;
+        const maxP = getMaxPlayers(game);
+        const isUnlimited = (maxP <= 0 || maxP >= 999);
+        const maxPlayersDisplay = isUnlimited ? '∞' : maxP;
+
+        const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+        const timeDelta = startAt - serverTime;
+        const timerText = formatDurationCard(timeDelta);
+        const gameID = game.gameID;
+
+        const imgHtml = thumbUrl
+            ? `<img draggable="false" src="${thumbUrl}" alt="${mapName}" class="absolute inset-0 w-full h-full object-cover opacity-80">`
+            : '';
+
+        return {
+            gameID, html: `
+      <button class="group relative w-full flex flex-row text-white text-left uppercase rounded-xl transition-all duration-200 bg-surface hover:bg-white/5 border border-white/5 grayscale opacity-75" style="height: 7.5rem; filter: grayscale(100%) !important; overflow: hidden;">
+        <div class="relative w-32 shrink-0 bg-black/40 border-r border-white/5">
+          ${imgHtml}
+          <div class="absolute bottom-1 right-1"><span class="blon-timer text-[10px] font-bold tracking-widest normal-case bg-malibu-blue text-white px-1.5 py-0.5 rounded shadow-sm">${timerText}</span></div>
+        </div>
+
+        <div class="flex flex-col justify-center grow px-3 py-2 min-w-0 pr-10">
+          <span class="self-start flex items-center gap-1 text-[11px] font-bold tracking-widest bg-black/60 px-2 py-1 rounded mb-1.5">
+            ${numClients}/${maxPlayersDisplay}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z"></path>
+            </svg>
+          </span>
+          <p class="text-sm font-bold uppercase tracking-wider truncate w-full text-white/90">${mapName}</p>
+          <h3 class="text-[10px] text-white/50 uppercase tracking-wider truncate w-full mt-0.5">${modeLabel}</h3>
+        </div>
+
+        <div class="blon-copy-btn absolute right-2 top-1/2 -translate-y-1/2 bg-black/80 hover:bg-black text-white text-[12px] px-2 py-1.5 rounded cursor-pointer transition-colors border border-green-500 shadow-sm z-10" data-blon-gameid="${gameID}" title="Copy Invite Link">
+          🔗
+        </div>
+      </button>
+    ` };
+    }
+
+    // --- Helper function to attach event listeners to buttons ---
+    function attachButtonListeners(wrapper, gameID) {
+        const btn = wrapper.querySelector('button.blon-upcoming-card') || wrapper.querySelector('button.group');
+        if (btn) {
+            btn.dataset.blonGameid = String(gameID);
+            btn.addEventListener('click', () => {
+                const url = getLobbyUrl(gameID);
+                navigator.clipboard.writeText(url).catch(() => {});
+                try {
+                    if (typeof window.showPage === 'function') window.showPage('page-join-lobby');
+                    document.dispatchEvent(new CustomEvent('join-lobby', {
+                        detail: { gameID, source: 'public' },
+                        bubbles: true, composed: true,
+                    }));
+                    return;
+                } catch (e) { }
+                const joinModal = document.querySelector('join-lobby-modal');
+                if (joinModal && typeof joinModal.open === 'function') {
+                    try { joinModal.open({ lobbyId: gameID }); return; } catch (e) { }
+                }
+                window.location.href = url;
+            });
+        }
+
+        const copyBtn = wrapper.querySelector('.blon-copy-btn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const url = getLobbyUrl(gameID);
+                navigator.clipboard.writeText(url).then(() => {
+                    const originalText = copyBtn.textContent;
+                    copyBtn.textContent = '✅';
+                    copyBtn.style.backgroundColor = '#16a34a';
+                    copyBtn.style.borderColor = '#16a34a';
+                    setTimeout(() => {
+                        copyBtn.textContent = originalText;
+                        copyBtn.style.backgroundColor = '';
+                        copyBtn.style.borderColor = '';
+                    }, 2000);
+                });
+            });
+        }
+    }
+
     function updateLobbyGridLayout() {
         let styleEl = document.getElementById('blon-lobby-3x2-grid-css');
         if (!styleEl) {
             styleEl = document.createElement('style');
             styleEl.id = 'blon-lobby-3x2-grid-css';
             styleEl.textContent = `
-                /* Hide native items completely so our fully sorted injected components take over the grid */
+                /* Hide native items completely from the main grid */
                 div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div:not(.blon-upcoming-slot) {
                     display: none !important;
                 }
@@ -278,20 +356,63 @@
                     display: block !important;
                     width: 100%;
                 }
-                .blon-upcoming-slot button {
-                    height: 11rem !important;
+                .blon-upcoming-slot > button.blon-upcoming-card {
+                    height: 11rem;
                 }
                 @media (min-width: 640px) {
                     div.grid[class*="sm:grid-cols-[2fr_1fr]"] {
                         grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
                         height: auto !important;
                     }
-                    .blon-upcoming-slot button {
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] .blon-upcoming-slot > button.blon-upcoming-card {
                         height: 12rem !important;
                     }
                 }
             `;
             document.head.appendChild(styleEl);
+        }
+
+        // --- Step 1: Detect if we are on the Homescreen ---
+        const mainGrid = document.querySelector('div.grid[class*="sm:grid-cols-[2fr_1fr]"]');
+        const isHomescreen = mainGrid && window.getComputedStyle(mainGrid).display !== 'none' && !document.querySelector('.in-game') && !document.body.classList.contains('in-game') && !window.location.pathname.includes('/game/');
+
+        let sidebar = document.getElementById('blon-fixed-private-sidebar');
+
+        // If we are in-game or the main grid is hidden, hide the sidebar and halt rendering
+        if (!isHomescreen) {
+            if (sidebar) sidebar.style.display = 'none';
+            return;
+        }
+
+        // --- Step 2: Initialize or Show the Fixed Sidebar ---
+        if (!sidebar) {
+            sidebar = document.createElement('div');
+            sidebar.id = 'blon-fixed-private-sidebar';
+
+            sidebar.style.position = 'fixed';
+            sidebar.style.top = '100px';
+            sidebar.style.right = '20px';
+            sidebar.style.width = '360px'; // Wide sidebar
+            sidebar.style.maxHeight = 'calc(100vh - 120px)';
+            sidebar.style.overflowY = 'auto';
+            sidebar.style.display = 'flex';
+            sidebar.style.flexDirection = 'column';
+            sidebar.style.gap = '0.75rem';
+            sidebar.style.zIndex = '50';
+            sidebar.style.paddingRight = '8px';
+
+            const scrollStyle = document.createElement('style');
+            scrollStyle.textContent = `
+                #blon-fixed-private-sidebar::-webkit-scrollbar { width: 6px; }
+                #blon-fixed-private-sidebar::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.2); border-radius: 4px; }
+                #blon-fixed-private-sidebar::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 4px; }
+                #blon-fixed-private-sidebar::-webkit-scrollbar-thumb:hover { background: #718096; }
+            `;
+            document.head.appendChild(scrollStyle);
+
+            document.body.appendChild(sidebar);
+        } else {
+            sidebar.style.display = 'flex'; // Ensure it's visible if we came back to homescreen
         }
 
         if (!lobbyLatestPayload || !lobbyLatestPayload.games) return;
@@ -301,128 +422,88 @@
 
         const allGames = Object.values(lobbyLatestPayload.games).flat();
 
-        document.querySelectorAll('div.grid[class*="sm:grid-cols-[2fr_1fr]"]').forEach(grid => {
+        // --- Step 3: Split Games into Public vs Private(Sidebar) ---
+        const publicGames = [];
+        const privateGames = [];
 
-            // NEW SORTING LOGIC: (∞ and Full) Bottom -> Teams First -> FFA Second -> Fallback Time
-            const candidates = allGames.sort((a, b) => {
+        allGames.forEach(game => {
+            const nc = Number(game.numClients) || 0;
+            const mp = getMaxPlayers(game);
+            const isUnlim = (mp <= 0 || mp >= 999);
+            const isFull = (!isUnlim && nc >= mp);
 
-                // Helper to push full OR private(∞) games to the bottom
-                const getBottomWeight = (game) => {
-                    const nc = Number(game.numClients) || 0;
-                    const mp = getMaxPlayers(game);
-                    const isUnlim = (mp <= 0 || mp >= 999);
-                    const isFull = (!isUnlim && nc >= mp);
-                    return (isUnlim || isFull) ? 1 : 0;
-                };
-
-                const bottomA = getBottomWeight(a);
-                const bottomB = getBottomWeight(b);
-
-                // If one should be at the bottom and the other shouldn't (1 > 0)
-                if (bottomA !== bottomB) {
-                    return bottomA - bottomB;
-                }
-
-                // Normal sorting for the rest
-                const getModeWeight = (game) => {
-                    const mode = game.gameConfig?.gameMode;
-                    if (mode === 'Team') return 0; // Teams First
-                    if (mode === 'Free For All') return 1; // FFA Second
-                    return 2; // Others Last
-                };
-
-                const weightA = getModeWeight(a);
-                const weightB = getModeWeight(b);
-
-                if (weightA !== weightB) {
-                    return weightA - weightB;
-                }
-
-                // Fallback to time sorting
-                const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
-                const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
-                return at - bt;
-            });
-
-            // Generate a state signature that includes the ID, current players, and max players.
-            // If someone joins or leaves, the string changes, instantly breaking the soft update cache and forcing a re-render.
-            const newGameStateStr = candidates.map(g => `${g.gameID}-${Number(g.numClients)||0}-${getMaxPlayers(g)}`).join(',');
-            const oldGameStateStr = grid.dataset.blonRenderedIds || '';
-
-            if (newGameStateStr === oldGameStateStr) {
-                // Soft Update (Nothing changed except time)
-                candidates.forEach((game, index) => {
-                    const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
-                    const timeDelta = startAt - serverTime;
-                    const timerEl = grid.querySelectorAll('.blon-timer')[index];
-                    if (timerEl) timerEl.textContent = formatDurationCard(timeDelta);
-                });
-                return;
+            if (isUnlim || isFull) {
+                privateGames.push(game);
+            } else {
+                publicGames.push(game);
             }
-
-            // Hard Update (Lobby order, fullness, or player counts changed)
-            grid.dataset.blonRenderedIds = newGameStateStr;
-            const existingFillers = Array.from(grid.querySelectorAll(':scope > .blon-upcoming-slot'));
-            existingFillers.forEach(el => el.remove());
-
-            candidates.forEach(game => {
-                const { gameID, html } = makeUpcomingLobbyCard(game, serverTime);
-                const wrapper = document.createElement('div');
-                wrapper.className = 'blon-upcoming-slot';
-                wrapper.innerHTML = html;
-
-                // Handle Joining AND Auto-Copying
-                const btn = wrapper.querySelector('button.blon-upcoming-card');
-                if (btn) {
-                    btn.dataset.blonGameid = String(gameID);
-                    btn.addEventListener('click', () => {
-                        const lobbyId = gameID;
-
-                        const url = getLobbyUrl(lobbyId);
-                        navigator.clipboard.writeText(url).catch(err => {
-                            console.error("Auto-copy to clipboard failed:", err);
-                        });
-
-                        try {
-                            if (typeof window.showPage === 'function') window.showPage('page-join-lobby');
-                            document.dispatchEvent(new CustomEvent('join-lobby', {
-                                detail: { gameID: lobbyId, source: 'public' },
-                                bubbles: true, composed: true,
-                            }));
-                            return;
-                        } catch (e) { }
-                        const joinModal = document.querySelector('join-lobby-modal');
-                        if (joinModal && typeof joinModal.open === 'function') {
-                            try { joinModal.open({ lobbyId }); return; } catch (e) { }
-                        }
-                        window.location.href = getLobbyUrl(lobbyId);
-                    });
-                }
-
-                // Handle Copy Link (Manual Button Click)
-                const copyBtn = wrapper.querySelector('.blon-copy-btn');
-                if (copyBtn) {
-                    copyBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        const url = getLobbyUrl(gameID);
-                        navigator.clipboard.writeText(url).then(() => {
-                            const originalText = copyBtn.textContent;
-                            copyBtn.textContent = '✅ Copied!';
-                            copyBtn.style.backgroundColor = '#16a34a';
-                            copyBtn.style.borderColor = '#16a34a';
-                            setTimeout(() => {
-                                copyBtn.textContent = originalText;
-                                copyBtn.style.backgroundColor = '';
-                                copyBtn.style.borderColor = '';
-                            }, 2000);
-                        });
-                    });
-                }
-
-                grid.appendChild(wrapper);
-            });
         });
+
+        // Universal Sorter: Teams > FFA > Time
+        const lobbySorter = (a, b) => {
+            const modeA = a.gameConfig?.gameMode;
+            const modeB = b.gameConfig?.gameMode;
+            const weightA = modeA === 'Team' ? 0 : (modeA === 'Free For All' ? 1 : 2);
+            const weightB = modeB === 'Team' ? 0 : (modeB === 'Free For All' ? 1 : 2);
+
+            if (weightA !== weightB) return weightA - weightB;
+
+            const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
+            const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
+            return at - bt;
+        };
+
+        publicGames.sort(lobbySorter);
+        privateGames.sort(lobbySorter);
+
+        // --- Step 4: Render Public Games (Main Grid) ---
+        document.querySelectorAll('div.grid[class*="sm:grid-cols-[2fr_1fr]"]').forEach(grid => {
+            const publicStateStr = publicGames.map(g => `${g.gameID}-${Number(g.numClients)||0}-${getMaxPlayers(g)}`).join(',');
+            const oldPublicState = grid.dataset.blonRenderedIds || '';
+
+            if (publicStateStr === oldPublicState) {
+                publicGames.forEach((game, index) => {
+                    const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+                    const timerEl = grid.querySelectorAll('.blon-timer')[index];
+                    if (timerEl) timerEl.textContent = formatDurationCard(startAt - serverTime);
+                });
+            } else {
+                grid.dataset.blonRenderedIds = publicStateStr;
+                Array.from(grid.querySelectorAll(':scope > .blon-upcoming-slot')).forEach(el => el.remove());
+
+                publicGames.forEach(game => {
+                    const { html, gameID } = makeUpcomingLobbyCard(game, serverTime);
+                    const cardWrapper = document.createElement('div');
+                    cardWrapper.className = 'blon-upcoming-slot';
+                    cardWrapper.innerHTML = html;
+                    attachButtonListeners(cardWrapper, gameID);
+                    grid.appendChild(cardWrapper);
+                });
+            }
+        });
+
+        // --- Step 5: Render Private/Full Games (Fixed Sidebar) ---
+        const privateStateStr = privateGames.map(g => `${g.gameID}-${Number(g.numClients)||0}-${getMaxPlayers(g)}`).join(',');
+        const oldPrivateState = sidebar.dataset.blonRenderedIds || '';
+
+        if (privateStateStr === oldPrivateState) {
+            privateGames.forEach((game, index) => {
+                const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+                const timerEl = sidebar.querySelectorAll('.blon-timer')[index];
+                if (timerEl) timerEl.textContent = formatDurationCard(startAt - serverTime);
+            });
+        } else {
+            sidebar.dataset.blonRenderedIds = privateStateStr;
+            sidebar.innerHTML = ''; // Clear all children
+
+            privateGames.forEach(game => {
+                const { html, gameID } = makeSidebarListCard(game, serverTime);
+                const cardWrapper = document.createElement('div');
+                cardWrapper.innerHTML = html;
+                attachButtonListeners(cardWrapper, gameID);
+                sidebar.appendChild(cardWrapper);
+            });
+        }
     }
 
     // --- Hide Elements Snippet ---
@@ -441,6 +522,20 @@
                 }
             }
         });
+    }
+
+    // --- Inject Adblock CSS ---
+    function injectAdblockStyles() {
+        const adblockStyle = document.createElement('style');
+        adblockStyle.textContent = String.raw`
+            .xl\:justify-start.hover\:shadow-lg.transition-shadow.shadow-md.py-2.px-3.bg-\[linear-gradient\(130deg\,\#3b4351\,\#282e39\)\].border-\[\#424c5c\].border-l.border-t.rounded.gap-3.justify-center.items-center.w-full.flex.group,
+            .sm\:py-2.sm\:px-3.sm\:rounded-xl.sm\:border-y-0.sm\:justify-center.sm\:flex-1.sm\:h-full.border-white\/10.border-y.py-2.px-2.bg-surface.flex-col.flex,
+            .lg\:gap-0.lg\:items-center.lg\:grid-cols-\[minmax\(0\,1fr\)_auto_minmax\(0\,1fr\)\].lg\:grid.z-50.relative.shrink-0.border-white\/10.border-t.w-full.text-white\/50.pb-3.pt-1.gap-1.justify-center.items-center.flex-col.flex.backdrop-blur-md.bg-zinc-900\/90.\[\.in-game_\&\]\:hidden,
+            .streaming-live.min-w-0.w-full.lg\:flex-col.lg\:h-full.lg\:flex.hidden {
+                display: none !important;
+            }
+        `;
+        document.head.appendChild(adblockStyle);
     }
 
     // --- WebSocket Logic ---
@@ -493,6 +588,7 @@
 
     // Initialize Feed and Start Update Interval
     function init() {
+        injectAdblockStyles();
         connectLobbyFeed();
         if (!uiUpdateInterval) {
             uiUpdateInterval = setInterval(() => {

@@ -16,39 +16,20 @@ https://www.tampermonkey.net
 
 
 Normal Version
-<img width="981" height="766" alt="image" src="https://github.com/user-attachments/assets/7fa02575-93dc-4ea9-b27f-a8eae4ba712a" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/844c1fad-cc9a-427a-ac7b-dd030bc60fd0" />
 
-----------------------
+- Clicking on map joins and copies map link
+- Clicking "copy link" only copies the link
+- player made lobbies are off to the right and grayscaled
+- removed bottom bar
+- removes "help" and "news" ( no one reads anyways )
 
-Psychpomp Version
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/19e80761-af6b-468b-9668-01d319587481" />
-
-
-
--clicking the map also copies the link
--sorts private lobbies last & grayscales them
-
-----------------------
+-------------------------------
 
 Expieremental Version
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/cff9619d-ddf6-4364-be86-219193e359ca" />
 
-
-**-this version is slower compared to the other 2 versions**
-
--removed the bottom bar
-
--moved buttons to the right
-
--removed help button
-
--seperates the teams and ffa
-
-----------------------
-
-**
----DO NOT USE THE SEZIURES VERSION---
-**
+- current version is outdated and broken
 
 ----------------------
 
@@ -63,7 +44,3 @@ This script does NOT
   - contact external servers ( except openfront.io )
   - use cookies
   - read clipboard
-
-----------------------
-
-Say hi to blon if you see him. tell him his hair is nice or something

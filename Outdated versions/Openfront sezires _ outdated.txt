@@ -1,0 +1,583 @@
+// ==UserScript==
+// @name        Sezure version | future lobbies
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Do not use, epileptic seizure inbound
+// @author       psychpomp
+// @match        *://openfront.io/*
+// @match        *://*.openfront.io/*
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    let lobbyWS = null;
+    let lobbyReconnectTimeout = null;
+    let lobbyShouldReconnect = true;
+    let lobbyLatestPayload = null;
+
+    // --- Core URL & Worker Helpers ---
+    function getNumWorkers() {
+        const bc = window.BOOTSTRAP_CONFIG;
+        return bc && Number.isInteger(bc.numWorkers) && bc.numWorkers > 0 ? bc.numWorkers : 8;
+    }
+
+    function simpleHashForWorkerPath(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash);
+    }
+
+    function getCurrentWorkerPath() {
+        const pathParts = window.location.pathname.split("/").filter(Boolean);
+        const candidate = pathParts[0];
+        return /^w\d+$/.test(candidate) ? candidate : null;
+    }
+
+    function getWorkerPath(gameID) {
+        const currentPath = getCurrentWorkerPath();
+        if (currentPath) {
+            return currentPath;
+        }
+        return `w${simpleHashForWorkerPath(gameID) % getNumWorkers()}`;
+    }
+
+    function getLobbyUrl(gameID) {
+        const path = getWorkerPath(gameID);
+        return `${window.location.origin}/${path}/game/${encodeURIComponent(gameID)}`;
+    }
+
+    // --- Lobby Data Formatters ---
+    function getLobbyModifiers(game) {
+        const pm = game.publicGameModifiers || {};
+        const gcfg = game.gameConfig || {};
+        const disabled = Array.isArray(gcfg.disabledUnits) ? gcfg.disabledUnits : [];
+        const labels = [];
+
+        const goldMult = game.goldMultiplier ?? gcfg.goldMultiplier;
+        const goldMultN = typeof goldMult === 'number' ? goldMult : parseFloat(goldMult);
+        if (Number.isFinite(goldMultN) && goldMultN !== 1) labels.push(`x${goldMultN} Gold Multiplier`);
+
+        const startGold = game.startingGold ?? gcfg.startingGold;
+        const startGoldN = typeof startGold === 'number' ? startGold : parseFloat(startGold);
+        if (Number.isFinite(startGoldN) && startGoldN > 0) {
+            const display = startGoldN >= 1e6 ? `${startGoldN / 1e6}M` : startGoldN >= 1000 ? `${startGoldN / 1000}K` : String(startGoldN);
+            labels.push(`${display} Starting Gold`);
+        }
+
+        if (pm.isRandomSpawn === true || gcfg.randomSpawn === true) labels.push('Random Spawn');
+        if (pm.isCompact === true || gcfg.gameMapSize === 'Compact') labels.push('Compact Map');
+        if (pm.isCrowded === true) labels.push('Crowded');
+        if (pm.isHardNations === true) labels.push('Hard Nations');
+        if (pm.isAlliancesDisabled === true || gcfg.disableAlliances === true) labels.push('Alliances Disabled');
+        if (pm.isPortsDisabled === true || disabled.includes('Port')) labels.push('Ports Disabled');
+        if (pm.isNukesDisabled === true || disabled.includes('Atom Bomb')) labels.push('Nukes Disabled');
+        if (pm.isSAMsDisabled === true) labels.push('SAMs Disabled');
+        if (pm.isPeaceTime === true) labels.push('4min Peace');
+        if (pm.isWaterNukes === true || gcfg.waterNukes === true) labels.push('Water Nukes');
+
+        return labels;
+    }
+
+    function getLobbyMapSlug(mapName) {
+        if (typeof mapName !== 'string') return '';
+        return mapName.toLowerCase().replace(/[\s_]/g, '').replace(/[^\w]/g, '');
+    }
+
+    function getLobbyMapThumbnailUrl(mapName) {
+        const slug = getLobbyMapSlug(mapName);
+        if (!slug) return '';
+        return `https://raw.githubusercontent.com/openfrontio/OpenFrontIO/main/resources/maps/${slug}/thumbnail.webp`;
+    }
+
+    function formatDurationCard(ms) {
+        if (ms <= 0) return 'Now';
+        const totalSec = Math.ceil(ms / 1000);
+        const minutes = Math.floor(totalSec / 60);
+        const seconds = totalSec % 60;
+        if (minutes > 0 && seconds > 0) return `${minutes}min ${seconds}s`;
+        if (minutes > 0) return `${minutes}min`;
+        return `${seconds}s`;
+    }
+
+    function getLobbyModeLabel(game) {
+        const cfg = game.gameConfig;
+        const mode = cfg && typeof cfg.gameMode === 'string' ? cfg.gameMode : null;
+        const totalPlayers = cfg?.maxPlayers ?? game.numClients ?? undefined;
+
+        if (mode === 'Free For All') return 'FFA';
+        if (mode === 'Team') {
+            if (cfg?.playerTeams === 'Humans Vs Nations') {
+                return totalPlayers ? `Humans vs Nations (${totalPlayers} players)` : 'Humans vs Nations';
+            }
+            const namedTeamSizes = { Duos: 2, Trios: 3, Quads: 4 };
+            if (typeof cfg?.playerTeams === 'string' && namedTeamSizes[cfg.playerTeams]) {
+                const playersPerTeam = namedTeamSizes[cfg.playerTeams];
+                if (totalPlayers) {
+                    const teamCount = Math.floor(totalPlayers / playersPerTeam);
+                    return `${cfg.playerTeams} (${teamCount} teams of ${playersPerTeam})`;
+                }
+                return cfg.playerTeams;
+            }
+            if (typeof cfg?.playerTeams === 'number' && cfg.playerTeams > 0) {
+                const teamCount = cfg.playerTeams;
+                if (totalPlayers) {
+                    const playersPerTeam = Math.floor(totalPlayers / teamCount);
+                    return `${teamCount} teams of ${playersPerTeam}`;
+                }
+                return `${teamCount} teams`;
+            }
+            return 'Team';
+        }
+        if (game.publicGameType) return String(game.publicGameType).toUpperCase();
+        return 'UNKNOWN';
+    }
+
+    function getLobbyMapDisplay(game) {
+        try {
+            if (!game || typeof game !== 'object') return 'Unknown';
+            const resolveVal = (val) => {
+                if (val == null) return null;
+                if (typeof val === 'string' && val.trim()) return val.trim();
+                if (typeof val === 'number') return String(val);
+                if (typeof val === 'object') {
+                    if (typeof val.name === 'string' && val.name.trim()) return val.name.trim();
+                    if (typeof val.mapName === 'string' && val.mapName.trim()) return val.mapName.trim();
+                    if (typeof val.gameMap === 'string' && val.gameMap.trim()) return val.gameMap.trim();
+                    if (typeof val.id === 'string' && val.id.trim()) return val.id.trim();
+                    if (typeof val.id === 'number') return String(val.id);
+                }
+                return null;
+            };
+            const topCandidates = ['gameMap', 'game_map', 'map', 'mapName', 'map_name', 'terrain', 'terrainName', 'terrain_name', 'mapId', 'map_id'];
+            for (const k of topCandidates) {
+                if (Object.prototype.hasOwnProperty.call(game, k)) {
+                    const v = resolveVal(game[k]);
+                    if (v) return v;
+                }
+            }
+            if (game.gameConfig && typeof game.gameConfig === 'object') {
+                for (const k of topCandidates) {
+                    if (Object.prototype.hasOwnProperty.call(game.gameConfig, k)) {
+                        const v = resolveVal(game.gameConfig[k]);
+                        if (v) return v;
+                    }
+                }
+                if (Object.prototype.hasOwnProperty.call(game.gameConfig, 'gameMap')) {
+                    const v = resolveVal(game.gameConfig.gameMap);
+                    if (v) return v;
+                }
+            }
+            for (const key of Object.keys(game)) {
+                if (/map|terrain/i.test(key)) {
+                    const v = resolveVal(game[key]);
+                    if (v) return v;
+                }
+            }
+        } catch (e) { }
+        return 'Unknown';
+    }
+
+    // --- UI Generation & Rendering ---
+    function makeUpcomingLobbyCard(game, serverTime) {
+        const mapName = getLobbyMapDisplay(game);
+        const thumbUrl = getLobbyMapThumbnailUrl(mapName);
+        const modeLabel = getLobbyModeLabel(game);
+        const modifiers = getLobbyModifiers(game);
+        const maxPlayers = game.gameConfig?.maxPlayers ?? game.numClients ?? '?';
+        const numClients = game.numClients ?? 0;
+        const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+        const timeDelta = startAt - serverTime;
+        const isLive = timeDelta <= 0;
+        const timerText = isLive ? 'Open' : formatDurationCard(timeDelta);
+        const gameID = game.gameID;
+
+        const badgesHtml = modifiers.slice(0, 2).map(m =>
+            `<span class="px-2 py-1 rounded text-xs font-bold uppercase tracking-widest bg-malibu-blue text-white shadow-[var(--shadow-malibu-blue-pill)]">${m}</span>`
+        ).join('');
+
+        const modifiersHtml = modifiers.length > 0
+            ? `<div class="flex flex-col items-start gap-1 mt-[2px]">${badgesHtml}</div>`
+            : `<div></div>`;
+
+        const imgHtml = thumbUrl
+            ? `<img draggable="false" src="${thumbUrl}" alt="${mapName}" class="absolute inset-0 w-full h-full object-cover object-center scale-[1.05] [image-rendering:auto]">`
+            : '';
+
+        return {
+            gameID, html: `
+      <button class="group relative w-full h-44 sm:h-full text-white uppercase rounded-2xl transition-all duration-200 active:scale-[0.98] bg-surface hover:shadow-[var(--shadow-lobby-card-hover)] blon-upcoming-card">
+        <div class="absolute inset-0 rounded-2xl overflow-hidden pointer-events-none">
+          ${imgHtml}
+        </div>
+        <div class="absolute inset-x-2 top-2 flex items-start justify-between gap-2">
+          ${modifiersHtml}
+          ${!isLive ? `<div class="shrink-0"><span class="text-xs font-bold tracking-widest normal-case bg-malibu-blue text-white px-2 py-1 rounded">${timerText}</span></div>` : '<div></div>'}
+        </div>
+        <div class="absolute bottom-0 left-0 right-0 flex flex-col px-3 py-2 bg-black/55 backdrop-blur-sm rounded-b-2xl" style="overflow:visible;">
+          <span class="absolute bottom-full right-2 mb-1 flex items-center gap-1 text-xs font-bold tracking-widest bg-black/70 backdrop-blur-sm px-2 py-0.5 rounded">
+            ${numClients}/${maxPlayers}
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline-block" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z"></path>
+            </svg>
+          </span>
+          <p class="text-sm sm:text-base font-bold uppercase tracking-wider text-left leading-tight">${mapName}</p>
+          <h3 class="text-xs text-white/70 uppercase tracking-wider text-left">${modeLabel}</h3>
+        </div>
+        <style>
+          /* THE EARTHQUAKE */
+          @keyframes globalScreenShake {
+            0% { transform: translate(3px, 2px) rotate(0deg); }
+            10% { transform: translate(-2px, -3px) rotate(-1deg); }
+            20% { transform: translate(-4px, 0px) rotate(1deg); }
+            30% { transform: translate(0px, 4px) rotate(0deg); }
+            40% { transform: translate(2px, -2px) rotate(1deg); }
+            50% { transform: translate(-2px, 3px) rotate(-1deg); }
+            60% { transform: translate(-4px, 2px) rotate(0deg); }
+            70% { transform: translate(3px, 2px) rotate(-1deg); }
+            80% { transform: translate(-2px, -2px) rotate(1deg); }
+            90% { transform: translate(3px, 3px) rotate(0deg); }
+            100% { transform: translate(2px, -3px) rotate(-1deg); }
+          }
+
+          /* If the button exists, the entire website shakes */
+          body:has(.blon-copy-btn-madness) {
+            animation: globalScreenShake 0.1s infinite !important;
+            overflow-x: hidden;
+          }
+
+          /* GLOBAL LASER STYLES */
+          #blon-global-lasers {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            pointer-events: none; z-index: 999999; overflow: hidden; mix-blend-mode: screen;
+          }
+          /* Hide global lasers when copy button madness is paused */
+          body:not(:has(.blon-copy-btn-madness)) #blon-global-lasers {
+            display: none !important;
+          }
+
+          .global-laser { position: absolute; opacity: 0; }
+
+          @keyframes globalShootX {
+            0% { transform: translateX(-100vw); opacity: 1; }
+            100% { transform: translateX(100vw); opacity: 1; }
+          }
+          @keyframes globalShootY {
+            0% { transform: translateY(-100vh); opacity: 1; }
+            100% { transform: translateY(100vh); opacity: 1; }
+          }
+          @keyframes globalShootDiag1 {
+            0% { transform: translate(-100vw, -100vh) rotate(45deg); opacity: 1; }
+            100% { transform: translate(100vw, 100vh) rotate(45deg); opacity: 1; }
+          }
+          @keyframes globalShootDiag2 {
+            0% { transform: translate(100vw, -100vh) rotate(-45deg); opacity: 1; }
+            100% { transform: translate(-100vw, 100vh) rotate(-45deg); opacity: 1; }
+          }
+
+          /* 6 Massive Screen-Spanning Lasers */
+          .gl-1 { top: 15%; left: 0; width: 200vw; height: 30px; background: #f0f; box-shadow: 0 0 50px 25px #f0f, 0 0 100px #0ff; animation: globalShootX 0.35s infinite linear 0.1s; }
+          .gl-2 { top: 0; left: 30%; width: 40px; height: 200vh; background: #0f0; box-shadow: 0 0 60px 30px #0f0, 0 0 120px #ff0; animation: globalShootY 0.25s infinite linear 0.4s; }
+          .gl-3 { top: -50%; left: -50%; width: 300vw; height: 60px; background: #f00; box-shadow: 0 0 80px 40px #f00, 0 0 150px #ff0; animation: globalShootDiag1 0.3s infinite linear 0.2s; }
+          .gl-4 { top: 80%; left: 0; width: 200vw; height: 25px; background: #ff0; box-shadow: 0 0 40px 20px #ff0, 0 0 80px #f00; animation: globalShootX 0.4s infinite linear 0.5s reverse; }
+          .gl-5 { top: 0; left: 75%; width: 50px; height: 200vh; background: #00f; box-shadow: 0 0 70px 35px #00f, 0 0 140px #0ff; animation: globalShootY 0.3s infinite linear 0.7s reverse; }
+          .gl-6 { top: -50%; right: -50%; width: 300vw; height: 75px; background: #0ff; box-shadow: 0 0 90px 45px #0ff, 0 0 180px #fff; animation: globalShootDiag2 0.2s infinite linear 0.15s; }
+
+          /* BUTTON MADNESS */
+          @keyframes slowFlipChaos {
+            0% { transform: scale(1) rotate(0deg) translate(0px, 0px) skew(0deg); filter: hue-rotate(0deg) contrast(1); box-shadow: 0 0 10px red; }
+            25% { transform: scale(1.3) rotate(90deg) translate(20px, -20px) skew(15deg); filter: hue-rotate(90deg) contrast(2) invert(1); box-shadow: 0 0 50px lime; }
+            50% { transform: scale(0.6) rotate(180deg) translate(-30px, 20px) skew(-20deg); filter: hue-rotate(180deg) contrast(1.5); box-shadow: 0 0 20px blue; }
+            75% { transform: scale(1.5) rotate(270deg) translate(30px, -10px) skew(10deg); filter: hue-rotate(270deg) contrast(3) invert(1); box-shadow: 0 0 100px fuchsia; }
+            100% { transform: scale(1) rotate(360deg) translate(0px, 0px) skew(0deg); filter: hue-rotate(360deg) contrast(1); box-shadow: 0 0 10px red; }
+          }
+          @keyframes strobingBackground {
+            0%, 100% { background-color: #ff0000; border: 4px dashed #0ff; color: #fff; }
+            25% { background-color: #0f0; border: 8px dotted #f0f; color: #000; }
+            50% { background-color: #00f; border: 2px solid #ff0; color: #fff; }
+            75% { background-color: #f0f; border: 10px double #0f0; color: #000; }
+          }
+          @keyframes textSpasm {
+            0% { letter-spacing: -2px; font-size: 0.5rem; text-shadow: 2px 2px 0px red; }
+            25% { letter-spacing: 15px; font-size: 1.5rem; text-shadow: -4px -4px 0px blue; }
+            50% { letter-spacing: -5px; font-size: 0.3rem; text-shadow: 5px 0px 0px lime; }
+            75% { letter-spacing: 8px; font-size: 1.2rem; text-shadow: 0px -5px 0px yellow; }
+            100% { letter-spacing: -2px; font-size: 0.5rem; text-shadow: 2px 2px 0px red; }
+          }
+
+          /* LOCAL BUTTON LASERS */
+          @keyframes pewPew {
+            0% { transform: translate(-50%, -50%) scaleX(0); opacity: 1; }
+            50% { transform: translate(-50%, -50%) scaleX(1); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scaleX(0); opacity: 0; }
+          }
+          @keyframes pewPewVertical {
+            0% { transform: translate(-50%, -50%) rotate(90deg) scaleX(0); opacity: 1; }
+            50% { transform: translate(-50%, -50%) rotate(90deg) scaleX(1); opacity: 1; }
+            100% { transform: translate(-50%, -50%) rotate(90deg) scaleX(0); opacity: 0; }
+          }
+
+          /* EXPLOSIONS */
+          @keyframes kaboom {
+            0% { transform: translate(-50%, -50%) scale(0); opacity: 1; box-shadow: 0 0 100px 50px #ff9900, inset 0 0 50px 20px #ffffff; background: #fff; }
+            30% { background: #ff0000; box-shadow: 0 0 200px 100px #ff0000; opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(10); opacity: 0; box-shadow: 0 0 0px 0px #330000; background: #000; }
+          }
+
+          .blon-copy-btn-madness {
+            animation: slowFlipChaos 5s infinite ease-in-out, strobingBackground 0.08s infinite linear, textSpasm 0.15s infinite cubic-bezier(0.68, -0.55, 0.26, 1.55);
+            transform-origin: center center;
+            mix-blend-mode: difference;
+          }
+
+          .blon-copy-btn-madness::before, .blon-copy-btn-madness::after {
+            content: ''; position: absolute; top: 50%; left: 50%;
+            width: 3000px; height: 10px; z-index: -1;
+            pointer-events: none; mix-blend-mode: screen;
+          }
+          .blon-copy-btn-madness::before {
+            background: #0ff; box-shadow: 0 0 30px 15px #0ff, 0 0 60px #f0f;
+            animation: pewPew 0.15s infinite linear;
+          }
+          .blon-copy-btn-madness::after {
+            background: #f00; box-shadow: 0 0 30px 15px #f00, 0 0 60px #ff0;
+            animation: pewPewVertical 0.12s infinite linear;
+          }
+
+          /* Explosion Elements */
+          .blon-explosion {
+            position: absolute; top: 50%; left: 50%;
+            width: 20px; height: 20px; border-radius: 50%;
+            z-index: 100; pointer-events: none;
+            mix-blend-mode: hard-light;
+          }
+          .blon-explosion:nth-child(1) { animation: kaboom 0.3s infinite ease-out; }
+          .blon-explosion:nth-child(2) { animation: kaboom 0.5s infinite ease-out 0.15s; top: -50%; left: 120%; }
+          .blon-explosion:nth-child(3) { animation: kaboom 0.4s infinite ease-out 0.25s; top: 150%; left: -20%; }
+        </style>
+        <div class="blon-copy-btn blon-copy-btn-madness absolute bottom-2 right-2 rounded cursor-pointer z-50 pointer-events-auto font-black tracking-widest uppercase" data-blon-gameid="${gameID}" title="Copy Invite Link">
+            <div class="blon-explosion"></div>
+            <div class="blon-explosion"></div>
+            <div class="blon-explosion"></div>
+            ✨🔗 COPY 🔗✨
+        </div>
+      </button>
+    ` };
+    }
+
+    function updateLobbyGridLayout() {
+        // --- Inject the Global Lasers Container ONCE ---
+        if (!document.getElementById('blon-global-lasers')) {
+            const laserDiv = document.createElement('div');
+            laserDiv.id = 'blon-global-lasers';
+            laserDiv.innerHTML = `
+                <div class="global-laser gl-1"></div>
+                <div class="global-laser gl-2"></div>
+                <div class="global-laser gl-3"></div>
+                <div class="global-laser gl-4"></div>
+                <div class="global-laser gl-5"></div>
+                <div class="global-laser gl-6"></div>
+            `;
+            document.body.appendChild(laserDiv);
+        }
+
+        let styleEl = document.getElementById('blon-lobby-3x2-grid-css');
+        if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = 'blon-lobby-3x2-grid-css';
+            styleEl.textContent = `
+                @media (min-width: 640px) {
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] {
+                        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                        height: auto !important;
+                    }
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:block"],
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:flex"] {
+                        display: none !important;
+                    }
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:hidden"] {
+                        display: block !important;
+                    }
+                    div.grid[class*="sm:grid-cols-[2fr_1fr]"] > div[class*="sm:hidden"] button {
+                        height: 12rem !important;
+                    }
+                    .blon-upcoming-slot {
+                        display: block !important;
+                    }
+                    .blon-upcoming-slot button {
+                        height: 12rem !important;
+                    }
+                }
+            `;
+            document.head.appendChild(styleEl);
+        }
+
+        if (!lobbyLatestPayload || !lobbyLatestPayload.games) return;
+
+        const serverTime = typeof lobbyLatestPayload.serverTime === 'number' ? lobbyLatestPayload.serverTime : Date.now();
+        const allGames = Object.values(lobbyLatestPayload.games).flat();
+
+        document.querySelectorAll('div.grid[class*="sm:grid-cols-[2fr_1fr]"]').forEach(grid => {
+            const realCards = Array.from(grid.children).filter(el => el.classList.contains('sm:hidden') || el.className.includes('sm:hidden'));
+            const existingFillers = Array.from(grid.querySelectorAll(':scope > .blon-upcoming-slot'));
+            const fillerCount = Math.max(0, 6 - realCards.length);
+            const shownIds = new Set(
+                realCards.map(el => {
+                   const btn = el.querySelector('button[data-blon-gameid]');
+                   return btn ? btn.dataset.blonGameid : null;
+                }).filter(Boolean)
+            );
+
+            const candidates = allGames
+                .filter(g => !shownIds.has(String(g.gameID)))
+                .sort((a, b) => {
+                    const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
+                    const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
+                    return at - bt;
+                })
+                .slice(0, fillerCount);
+
+            existingFillers.forEach(el => el.remove());
+
+            candidates.forEach(game => {
+                const { gameID, html } = makeUpcomingLobbyCard(game, serverTime);
+                const wrapper = document.createElement('div');
+                wrapper.className = 'blon-upcoming-slot';
+                wrapper.innerHTML = html;
+
+                // Handle Joining AND Auto-Copying
+                const btn = wrapper.querySelector('button.blon-upcoming-card');
+                if (btn) {
+                    btn.dataset.blonGameid = String(gameID);
+                    btn.addEventListener('click', () => {
+                        const lobbyId = gameID;
+
+                        // --- NEW: Automatically copy the link to clipboard ---
+                        const url = getLobbyUrl(lobbyId);
+                        navigator.clipboard.writeText(url).catch(err => {
+                           console.error("Auto-copy to clipboard failed:", err);
+                        });
+                        // -----------------------------------------------------
+
+                        try {
+                            if (typeof window.showPage === 'function') window.showPage('page-join-lobby');
+                            document.dispatchEvent(new CustomEvent('join-lobby', {
+                                detail: { gameID: lobbyId, source: 'public' },
+                                bubbles: true, composed: true,
+                            }));
+                            return;
+                        } catch (e) { }
+
+                        const joinModal = document.querySelector('join-lobby-modal');
+                        if (joinModal && typeof joinModal.open === 'function') {
+                            try { joinModal.open({ lobbyId }); return; } catch (e) { }
+                        }
+                        window.location.href = getLobbyUrl(lobbyId);
+                    });
+                }
+
+                // Handle Copy Link (Manual Button Click)
+                const copyBtn = wrapper.querySelector('.blon-copy-btn');
+                if (copyBtn) {
+                    copyBtn.addEventListener('click', (e) => {
+                        e.stopPropagation(); // Stop parent button from triggering join event
+                        e.preventDefault();
+
+                        const url = getLobbyUrl(gameID);
+                        navigator.clipboard.writeText(url).then(() => {
+                            // Save innerHTML so we can restore the explosion divs later
+                            const originalHTML = copyBtn.innerHTML;
+                            copyBtn.textContent = '✅ Copied!';
+
+                            // Strip the madness class temporarily to stop the global lasers, screen shaking, and button chaos
+                            copyBtn.classList.remove('blon-copy-btn-madness');
+
+                            // Apply calm styles
+                            copyBtn.style.backgroundColor = '#16a34a';
+                            copyBtn.style.color = '#ffffff';
+                            copyBtn.style.transform = 'scale(1)';
+                            copyBtn.style.border = '2px solid transparent';
+                            copyBtn.style.padding = '0.5rem 1rem';
+
+                            setTimeout(() => {
+                                // Restore the HTML (bringing back the explosions) and the madness class
+                                copyBtn.innerHTML = originalHTML;
+                                copyBtn.classList.add('blon-copy-btn-madness');
+
+                                // Clean up the inline styles
+                                copyBtn.style.backgroundColor = '';
+                                copyBtn.style.color = '';
+                                copyBtn.style.transform = '';
+                                copyBtn.style.border = '';
+                                copyBtn.style.padding = '';
+                            }, 2000);
+                        });
+                    });
+                }
+
+                grid.appendChild(wrapper);
+            });
+        });
+    }
+
+    // --- WebSocket Logic ---
+    function handleLobbySocketMessage(event) {
+        try {
+            const payload = JSON.parse(event.data);
+            if (payload && typeof payload.serverTime === 'number' && payload.games) {
+                lobbyLatestPayload = payload;
+                updateLobbyGridLayout();
+            }
+        } catch (e) {
+            console.error('[Blon-FutureLobbies] Feed parse failed', e);
+        }
+    }
+
+    function scheduleLobbyReconnect() {
+        if (!lobbyShouldReconnect || lobbyReconnectTimeout) return;
+        lobbyReconnectTimeout = window.setTimeout(() => {
+            lobbyReconnectTimeout = null;
+            if (lobbyShouldReconnect) connectLobbyFeed();
+        }, 3000);
+    }
+
+    function connectLobbyFeed() {
+        if (lobbyWS) return;
+        lobbyShouldReconnect = true;
+        const workerPath = `/w${Math.floor(Math.random() * getNumWorkers())}`;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}${workerPath}/lobbies`;
+
+        try {
+            lobbyWS = new WebSocket(url);
+            lobbyWS.addEventListener('open', () => {
+                if (lobbyReconnectTimeout) { clearTimeout(lobbyReconnectTimeout); lobbyReconnectTimeout = null; }
+            });
+            lobbyWS.addEventListener('message', handleLobbySocketMessage);
+            lobbyWS.addEventListener('close', () => {
+                lobbyWS = null;
+                scheduleLobbyReconnect();
+            });
+            lobbyWS.addEventListener('error', () => {
+                lobbyWS = null;
+                scheduleLobbyReconnect();
+            });
+        } catch (e) {
+            lobbyWS = null;
+            scheduleLobbyReconnect();
+        }
+    }
+
+    // Initialize Feed when document is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', connectLobbyFeed);
+    } else {
+        connectLobbyFeed();
+    }
+
+})();

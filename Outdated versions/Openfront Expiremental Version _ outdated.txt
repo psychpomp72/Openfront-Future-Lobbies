@@ -1,0 +1,746 @@
+// ==UserScript==
+// @name         Openfront Lobbies | Expieremental Version
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  Openfront Lobby expierement Version
+// @author       psychpomp
+// @match        *://openfront.io/
+// @match        *://www.openfront.io/
+// @match        *://openfront.io/lobbies*
+// @match        *://www.openfront.io/lobbies*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    let lobbyWS = null;
+    let lobbyReconnectTimeout = null;
+    let lobbyShouldReconnect = true;
+    let lobbyLatestPayload = null;
+    let payloadReceivedAt = Date.now();
+
+    // --- Path Checker ---
+    function isAllowedPage() {
+        const path = window.location.pathname;
+        const hash = window.location.hash;
+
+        // Hide the custom UI if a modal is open in the URL hash
+        if (hash.includes('modal=ranked') || hash.includes('modal=single-player') || hash.includes('modal=')) {
+            return false;
+        }
+
+        return path === '/' || path === '' || path.startsWith('/lobbies');
+    }
+
+    // --- Core URL & Worker Helpers ---
+    function getNumWorkers() {
+        const bc = window.BOOTSTRAP_CONFIG;
+        return bc && Number.isInteger(bc.numWorkers) && bc.numWorkers > 0 ? bc.numWorkers : 8;
+    }
+
+    function simpleHashForWorkerPath(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash);
+    }
+
+    function getCurrentWorkerPath() {
+        const pathParts = window.location.pathname.split("/").filter(Boolean);
+        const candidate = pathParts[0];
+        return /^w\d+$/.test(candidate) ? candidate : null;
+    }
+
+    function getWorkerPath(gameID) {
+        const currentPath = getCurrentWorkerPath();
+        if (currentPath) {
+            return currentPath;
+        }
+        return `w${simpleHashForWorkerPath(gameID) % getNumWorkers()}`;
+    }
+
+    function getLobbyUrl(gameID) {
+        const path = getWorkerPath(gameID);
+        return `${window.location.origin}/${path}/game/${encodeURIComponent(gameID)}`;
+    }
+
+    // --- Lobby Data Formatters ---
+    function getLobbyModifiers(game) {
+        const pm = game.publicGameModifiers || {};
+        const gcfg = game.gameConfig || {};
+        const disabled = Array.isArray(gcfg.disabledUnits) ? gcfg.disabledUnits : [];
+        const labels = [];
+
+        const goldMult = game.goldMultiplier ?? gcfg.goldMultiplier;
+        const goldMultN = typeof goldMult === 'number' ? goldMult : parseFloat(goldMult);
+        if (Number.isFinite(goldMultN) && goldMultN !== 1) labels.push(`x${goldMultN} Gold`);
+
+        const startGold = game.startingGold ?? gcfg.startingGold;
+        const startGoldN = typeof startGold === 'number' ? startGold : parseFloat(startGold);
+        if (Number.isFinite(startGoldN) && startGoldN > 0) {
+            const display = startGoldN >= 1e6 ? `${startGoldN / 1e6}M` : startGoldN >= 1000 ? `${startGoldN / 1000}K` : String(startGoldN);
+            labels.push(`${display} Start Gold`);
+        }
+
+        if (pm.isRandomSpawn === true || gcfg.randomSpawn === true) labels.push('Random Spawn');
+        if (pm.isCompact === true || gcfg.gameMapSize === 'Compact') labels.push('Compact Map');
+        if (pm.isCrowded === true) labels.push('Crowded');
+        if (pm.isHardNations === true) labels.push('Hard Nations');
+        if (pm.isAlliancesDisabled === true || gcfg.disableAlliances === true) labels.push('No Alliances');
+        if (pm.isPortsDisabled === true || disabled.includes('Port')) labels.push('No Ports');
+        if (pm.isNukesDisabled === true || disabled.includes('Atom Bomb')) labels.push('No Nukes');
+        if (pm.isSAMsDisabled === true) labels.push('No SAMs');
+        if (pm.isPeaceTime === true) labels.push('4min Peace');
+        if (pm.isWaterNukes === true || gcfg.waterNukes === true) labels.push('Water Nukes');
+
+        return labels;
+    }
+
+    function getLobbyMapSlug(mapName) {
+        if (typeof mapName !== 'string') return '';
+        return mapName.toLowerCase().replace(/[\s_]/g, '').replace(/[^\w]/g, '');
+    }
+
+    function getLobbyMapThumbnailUrl(mapName) {
+        const slug = getLobbyMapSlug(mapName);
+        if (!slug) return '';
+        return `https://raw.githubusercontent.com/openfrontio/OpenFrontIO/main/resources/maps/${slug}/thumbnail.webp`;
+    }
+
+    function formatDurationCard(ms) {
+        if (ms <= 0) return 'Now';
+        const totalSec = Math.ceil(ms / 1000);
+        const minutes = Math.floor(totalSec / 60);
+        const seconds = totalSec % 60;
+        if (minutes > 0 && seconds > 0) return `${minutes}m ${seconds}s`;
+        if (minutes > 0) return `${minutes}m`;
+        return `${seconds}s`;
+    }
+
+    function getLobbyModeLabel(game) {
+        const cfg = game.gameConfig;
+        const mode = cfg && typeof cfg.gameMode === 'string' ? cfg.gameMode : null;
+        const totalPlayers = cfg?.maxPlayers ?? game.numClients ?? undefined;
+
+        if (mode === 'Free For All') return 'FFA';
+        if (mode === 'Team') {
+            if (cfg?.playerTeams === 'Humans Vs Nations') {
+                return totalPlayers ? `Humans vs Nations (${totalPlayers}p)` : 'Humans vs Nations';
+            }
+            const namedTeamSizes = { Duos: 2, Trios: 3, Quads: 4 };
+            if (typeof cfg?.playerTeams === 'string' && namedTeamSizes[cfg.playerTeams]) {
+                const playersPerTeam = namedTeamSizes[cfg.playerTeams];
+                if (totalPlayers) {
+                    const teamCount = Math.floor(totalPlayers / playersPerTeam);
+                    return `${cfg.playerTeams} (${teamCount} teams of ${playersPerTeam})`;
+                }
+                return cfg.playerTeams;
+            }
+            if (typeof cfg?.playerTeams === 'number' && cfg.playerTeams > 0) {
+                const teamCount = cfg.playerTeams;
+                if (totalPlayers) {
+                    const playersPerTeam = Math.floor(totalPlayers / teamCount);
+                    return `${teamCount} teams of ${playersPerTeam}`;
+                }
+                return `${teamCount} teams`;
+            }
+            return 'Team';
+        }
+        if (game.publicGameType) return String(game.publicGameType).toUpperCase();
+        return 'UNKNOWN';
+    }
+
+    function getLobbyMapDisplay(game) {
+        try {
+            if (!game || typeof game !== 'object') return 'Unknown';
+            const resolveVal = (val) => {
+                if (val == null) return null;
+                if (typeof val === 'string' && val.trim()) return val.trim();
+                if (typeof val === 'number') return String(val);
+                if (typeof val === 'object') {
+                    if (typeof val.name === 'string' && val.name.trim()) return val.name.trim();
+                    if (typeof val.mapName === 'string' && val.mapName.trim()) return val.mapName.trim();
+                    if (typeof val.gameMap === 'string' && val.gameMap.trim()) return val.gameMap.trim();
+                    if (typeof val.id === 'string' && val.id.trim()) return val.id.trim();
+                    if (typeof val.id === 'number') return String(val.id);
+                }
+                return null;
+            };
+            const topCandidates = ['gameMap', 'game_map', 'map', 'mapName', 'map_name', 'terrain', 'terrainName', 'terrain_name', 'mapId', 'map_id'];
+            for (const k of topCandidates) {
+                if (Object.prototype.hasOwnProperty.call(game, k)) {
+                    const v = resolveVal(game[k]);
+                    if (v) return v;
+                }
+            }
+            if (game.gameConfig && typeof game.gameConfig === 'object') {
+                for (const k of topCandidates) {
+                    if (Object.prototype.hasOwnProperty.call(game.gameConfig, k)) {
+                        const v = resolveVal(game.gameConfig[k]);
+                        if (v) return v;
+                    }
+                }
+                if (Object.prototype.hasOwnProperty.call(game.gameConfig, 'gameMap')) {
+                    const v = resolveVal(game.gameConfig.gameMap);
+                    if (v) return v;
+                }
+            }
+            for (const key of Object.keys(game)) {
+                if (/map|terrain/i.test(key)) {
+                    const v = resolveVal(game[key]);
+                    if (v) return v;
+                }
+            }
+        } catch (e) { }
+        return 'Unknown';
+    }
+
+    // --- Inject Master CSS ---
+    function injectMasterStyles() {
+        if (document.getElementById('blon-master-css')) return;
+        const style = document.createElement('style');
+        style.id = 'blon-master-css';
+        style.textContent = `
+            /* HIDE DEFAULTS */
+            div.grid[class*="sm:grid-cols-[2fr_1fr]"] { display: none !important; }
+            footer { display: none !important; }
+            a[href="/help"], a[href*="/help"], a[href="/news"], a[href*="/news"] { display: none !important; }
+            #hamburger-btn { display: none !important; }
+
+            /* FORCE HIDE MOBILE ELEMENTS ON DESKTOP */
+            .md\\:hidden, .lg\\:hidden { display: none !important; }
+            @media (min-width: 640px) {
+                .sm\\:hidden { display: none !important; }
+            }
+
+            /* --- CUSTOM LEFT ALIGNED MAIN MENU --- */
+            .blon-main-menu {
+                position: absolute !important;
+                left: 150px !important;
+                top: 250px !important;
+                width: 320px !important;
+                max-width: 320px !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 12px !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                box-sizing: border-box !important;
+                align-items: stretch !important;
+                background: transparent !important;
+                border: none !important;
+                border-radius: 0 !important;
+                backdrop-filter: none !important;
+                box-shadow: none !important;
+
+                height: auto !important;
+                min-height: max-content !important;
+                max-height: none !important;
+                overflow: visible !important;
+            }
+
+            .blon-main-menu > div:not(.sm\\:hidden):not(.blon-profile) {
+                display: contents !important;
+            }
+
+            .blon-profile { order: 0 !important; width: 100% !important; margin-bottom: 5px !important; }
+
+            .blon-btn-create, .blon-btn-solo, .blon-btn-ranked, .blon-btn-join {
+                width: 100% !important;
+                margin: 0 !important;
+            }
+
+            .blon-btn-create {
+                order: 1 !important;
+                min-height: 70px !important;
+                font-size: 18px !important;
+                font-weight: 500 !important;
+            }
+            .blon-btn-ranked { order: 2 !important; min-height: 50px !important; }
+            .blon-btn-solo   { order: 3 !important; min-height: 50px !important; }
+            .blon-btn-join   { order: 4 !important; min-height: 50px !important; }
+
+            /* --- FIXED STRUCTURE 50/50 SPLIT SIDE PANEL --- */
+            #blon-side-lobbies {
+                position: fixed;
+                top: 120px;
+                right: 20px;
+                width: calc(100vw - 400px);
+                max-width: 1500px;
+                height: calc(100vh - 140px); /* Leave room at the bottom */
+                z-index: 9999;
+                padding: 0;
+                display: flex;
+                flex-direction: column;
+                background: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
+                backdrop-filter: none !important;
+                overflow: hidden; /* Prevent the main container from moving/scrolling */
+            }
+
+            .blon-rows-container {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                height: 100%; /* Force container to respect the exact panel height */
+                width: 100%;
+            }
+
+            .blon-row-section {
+                display: flex;
+                flex-direction: column;
+                width: 100%;
+                height: 50%; /* Lock each section to EXACTLY half the screen vertically */
+                min-height: 0; /* Prevents flex-children from expanding the section */
+            }
+
+            .blon-row-title {
+                color: #f8fafc;
+                font-size: 16px;
+                font-weight: bold;
+                text-transform: uppercase;
+                text-align: left;
+                padding-bottom: 6px;
+                border-bottom: 2px dashed rgba(255,255,255,0.2);
+                margin-bottom: 16px;
+                text-shadow: 0 2px 5px rgba(0,0,0,0.8);
+                flex-shrink: 0; /* Prevent the title from shrinking */
+            }
+
+            /* --- AUTO-WRAPPING FLEX LAYOUT --- */
+            .blon-row-cards {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 24px;
+                align-content: flex-start; /* Stack newly wrapped cards at the top */
+                flex: 1; /* Consume remaining space in the 50% section */
+                overflow-y: auto; /* Enable internal scrolling if cards overfill their section */
+                padding-bottom: 20px;
+            }
+
+            /* Scrollbars for individual sections if they overflow */
+            .blon-row-cards::-webkit-scrollbar { width: 6px; }
+            .blon-row-cards::-webkit-scrollbar-thumb { background: rgba(71, 85, 105, 0.7); border-radius: 4px; }
+
+            /* Primary Row Card Size (First 3 elements) */
+            .blon-side-card {
+                background: transparent;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid #334155;
+                position: relative;
+
+                /* Responsive width: Takes exactly 1/3rd of the container */
+                width: calc(33.333% - 16px);
+
+                /* Perfect Aspect Ratio: Shaved down height slightly more (Widescreen format) */
+                aspect-ratio: 16 / 9;
+                height: auto;
+
+                box-shadow: 0 6px 12px rgba(0,0,0,0.4);
+            }
+
+            /* Wrapped Row Card Size (Element 4 and beyond drops to 1/5th width for even smaller cards!) */
+            .blon-side-card:nth-child(n+4) {
+                width: calc(20% - 19.2px);
+            }
+
+            .blon-side-img-wrapper {
+                position: absolute;
+                top: 0; left: 0;
+                width: 100%; height: 100%;
+                z-index: 1;
+            }
+            .blon-side-img {
+                width: 100%; height: 100%;
+                object-fit: cover;
+                background: #0f172a;
+            }
+
+            /* Gradient scales perfectly as the card shrinks */
+            .blon-blur-overlay {
+                position: absolute;
+                bottom: 0; left: 0;
+                width: 100%;
+                height: 55%;
+                z-index: 2;
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
+                background: linear-gradient(to bottom, rgba(15, 23, 42, 0) 0%, rgba(15, 23, 42, 0.8) 30%, rgba(15, 23, 42, 0.95) 100%);
+            }
+
+            .blon-side-timer {
+                position: absolute; top: 12px; right: 12px;
+                background: rgba(0,0,0,0.8);
+                color: #fff; padding: 6px 10px; border-radius: 6px;
+                font-size: 12px; font-weight: bold; z-index: 10;
+            }
+
+            .blon-side-content {
+                position: absolute;
+                bottom: 0; left: 0;
+                width: 100%;
+                height: 65%;
+                padding: 12px;
+                display: flex; flex-direction: column; justify-content: flex-end; gap: 6px;
+                box-sizing: border-box;
+                z-index: 3;
+            }
+
+            .blon-side-title { color: #f8fafc; font-size: 15px; font-weight: bold; text-transform: uppercase; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+            .blon-side-mode { color: #cbd5e1; font-size: 11px; text-transform: uppercase; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+            .blon-side-modifiers { display: flex; flex-wrap: wrap; gap: 6px; overflow: hidden; }
+            .blon-mod-badge { background: rgba(2, 132, 199, 0.9); color: #fff; font-size: 9px; font-weight: bold; padding: 4px 6px; border-radius: 4px; text-transform: uppercase; box-shadow: 0 2px 4px rgba(0,0,0,0.4); }
+
+            /* --- SIMPLIFIED JOIN BUTTON (NO FLICKER) --- */
+            .blon-join-btn {
+                margin-top: 4px;
+                background: rgba(15, 23, 42, 0.95) !important;
+                color: white;
+                border: 1px solid #334155;
+                padding: 10px 16px;
+                width: 100%;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 700;
+                cursor: pointer;
+                text-align: center;
+                text-transform: uppercase;
+            }
+
+            .blon-join-btn:hover {
+                background: #2563eb !important;
+                border-color: #2563eb !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // --- Core Function: UI Cleanup & Main Menu Assembly ---
+    function cleanUpAndReformatUI() {
+        if (!isAllowedPage()) return;
+
+        // Hide maps
+        document.querySelectorAll('a[href*="/game/"], a[href^="/w"]').forEach(link => {
+            if (!link.closest('#blon-side-lobbies')) {
+                link.style.display = 'none';
+                const grid = link.closest('.grid');
+                if (grid && grid.className.includes('sm:grid-cols')) grid.style.display = 'none';
+            }
+        });
+
+        // Hide exact "HELP", "NEWS", and News Banner
+        document.querySelectorAll('a, button, span, div').forEach(el => {
+            if (el.children.length === 0 && el.textContent) {
+                const text = el.textContent.trim().toUpperCase();
+                if (text === 'HELP' || text === 'NEWS') {
+                    el.style.display = 'none';
+                }
+                if (text === 'NEWS' && el.classList.length > 0) {
+                    const banner = el.closest('div.rounded-xl') || el.closest('div.bg-surface');
+                    if (banner && banner.clientHeight < 120) {
+                        banner.style.display = 'none';
+                    }
+                }
+            }
+        });
+
+        // Hide Top-Left Hamburger Menu via ID
+        const hamburgerBtn = document.getElementById('hamburger-btn');
+        if (hamburgerBtn) {
+            hamburgerBtn.style.setProperty('display', 'none', 'important');
+        }
+
+        // Shift top nav
+        const navLinkNames = ['PLAY', 'STORE', 'SETTINGS', 'LEADERBOARD', 'CLANS'];
+        document.querySelectorAll('a').forEach(a => {
+            if (a.textContent && navLinkNames.includes(a.textContent.trim().toUpperCase())) {
+                const navContainer = a.parentElement;
+                if (navContainer && navContainer.tagName === 'DIV') {
+                    navContainer.style.setProperty('justify-content', 'flex-start', 'important');
+                    navContainer.style.setProperty('margin-left', '40px', 'important');
+                    navContainer.style.setProperty('margin-right', 'auto', 'important');
+                }
+            }
+        });
+
+        // Hide Footer safely
+        document.querySelectorAll('a, span').forEach(el => {
+            if (el.textContent && el.textContent.trim() === 'Terms of Service') {
+                let curr = el;
+                while (curr && curr.tagName !== 'BODY') {
+                    if (curr.clientHeight > 0 && curr.clientHeight < 150) {
+                        curr.style.display = 'none';
+                        break;
+                    } else if (curr.clientHeight >= 150) {
+                        break;
+                    }
+                    curr = curr.parentElement;
+                }
+            }
+        });
+
+        // Build Main Left Menu
+        const btns = Array.from(document.querySelectorAll('button')).filter(b => {
+            return !b.closest('#blon-side-lobbies') && !b.closest('.sm\\:hidden');
+        });
+
+        const create = btns.find(b => b.textContent.trim().toUpperCase() === 'CREATE LOBBY');
+        const solo = btns.find(b => b.textContent.trim().toUpperCase() === 'SOLO');
+        const ranked = btns.find(b => b.textContent.trim().toUpperCase() === 'RANKED');
+        const join = btns.find(b => b.textContent.trim().toUpperCase() === 'JOIN LOBBY');
+        const flag = btns.find(b => b.textContent.trim().toUpperCase() === 'SELECT FLAG');
+
+        if (create && solo && ranked && join) {
+
+            const bottomRowWrapper = create.parentElement;
+            if (bottomRowWrapper && bottomRowWrapper.tagName === 'DIV') {
+                bottomRowWrapper.style.setProperty('display', 'flex', 'important');
+                bottomRowWrapper.style.setProperty('flex-direction', 'column', 'important');
+                bottomRowWrapper.style.setProperty('gap', '12px', 'important');
+                bottomRowWrapper.style.setProperty('width', '100%', 'important');
+            }
+
+            let mainContainer = create.parentElement;
+            while(mainContainer && mainContainer.tagName !== 'BODY') {
+                if (mainContainer.contains(solo) && mainContainer.contains(ranked) && mainContainer.contains(join) && (flag ? mainContainer.contains(flag) : true)) {
+                    break;
+                }
+                mainContainer = mainContainer.parentElement;
+            }
+
+            if (mainContainer && !mainContainer.classList.contains('blon-main-menu')) {
+                mainContainer.classList.add('blon-main-menu');
+
+                create.classList.add('blon-btn-create');
+                solo.classList.add('blon-btn-solo');
+                ranked.classList.add('blon-btn-ranked');
+                join.classList.add('blon-btn-join');
+
+                if (flag) {
+                    flag.parentElement.classList.add('blon-profile');
+                }
+            }
+        }
+    }
+
+    // --- UI Generation & Rendering ---
+    function updateLobbySidePanel() {
+        let panel = document.getElementById('blon-side-lobbies');
+
+        if (!isAllowedPage()) {
+            if (panel) panel.style.display = 'none';
+            return;
+        }
+
+        if (!lobbyLatestPayload || !lobbyLatestPayload.games) return;
+
+        injectMasterStyles();
+
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'blon-side-lobbies';
+            document.body.appendChild(panel);
+        }
+
+        panel.style.display = 'flex';
+
+        const elapsedSincePayload = Date.now() - payloadReceivedAt;
+        const serverTime = (typeof lobbyLatestPayload.serverTime === 'number' ? lobbyLatestPayload.serverTime : Date.now()) + elapsedSincePayload;
+        const allGames = Object.values(lobbyLatestPayload.games).flat();
+
+        const candidates = allGames.sort((a, b) => {
+            const at = typeof a.startsAt === 'number' ? a.startsAt : serverTime;
+            const bt = typeof b.startsAt === 'number' ? b.startsAt : serverTime;
+            return at - bt;
+        });
+
+        // Setup the Rigid 50/50 container
+        panel.innerHTML = `
+            <div class="blon-rows-container">
+                <div class="blon-row-section" id="blon-row-team">
+                    <div class="blon-row-title">Team Games</div>
+                    <div class="blon-row-cards"></div>
+                </div>
+                <div class="blon-row-section" id="blon-row-ffa">
+                    <div class="blon-row-title">Free For All</div>
+                    <div class="blon-row-cards"></div>
+                </div>
+            </div>
+        `;
+
+        if (candidates.length === 0) {
+            panel.innerHTML = `
+                <div style="color:#f8fafc; font-size:16px; text-align:center; padding: 20px 0; font-weight:bold;">No upcoming lobbies found.</div>
+            `;
+            return;
+        }
+
+        const ffaColumn = panel.querySelector('#blon-row-ffa .blon-row-cards');
+        const teamColumn = panel.querySelector('#blon-row-team .blon-row-cards');
+
+        let ffaCount = 0;
+        let teamCount = 0;
+
+        candidates.forEach(game => {
+            const isFFA = game.gameConfig?.gameMode === 'Free For All';
+
+            const mapName = getLobbyMapDisplay(game);
+            const thumbUrl = getLobbyMapThumbnailUrl(mapName);
+            const modeLabel = getLobbyModeLabel(game);
+            const modifiers = getLobbyModifiers(game);
+            const maxPlayers = game.gameConfig?.maxPlayers ?? game.numClients ?? '?';
+            const numClients = game.numClients ?? 0;
+
+            const startAt = typeof game.startsAt === 'number' ? game.startsAt : serverTime;
+            const timeDelta = startAt - serverTime;
+            const timerText = timeDelta <= 0 ? 'Open' : formatDurationCard(timeDelta);
+
+            const gameID = game.gameID;
+
+            const modHtml = modifiers.map(m => `<span class="blon-mod-badge">${m}</span>`).join('');
+            const imgHtml = thumbUrl ? `<img draggable="false" src="${thumbUrl}" class="blon-side-img" onerror="this.style.display='none'">` : '';
+
+            const card = document.createElement('div');
+            card.className = 'blon-side-card';
+            card.innerHTML = `
+                <div class="blon-side-img-wrapper">
+                    ${imgHtml}
+                </div>
+                <div class="blon-blur-overlay"></div>
+                <div class="blon-side-timer">${timerText} &bull; ${numClients}/${maxPlayers}</div>
+                <div class="blon-side-content">
+                    <div class="blon-side-title" title="${mapName}">${mapName}</div>
+                    <div class="blon-side-mode">${modeLabel}</div>
+                    ${modifiers.length > 0 ? `<div class="blon-side-modifiers">${modHtml}</div>` : ''}
+                    <button class="blon-join-btn" data-gameid="${gameID}">Copy & Join</button>
+                </div>
+            `;
+
+            const btn = card.querySelector('.blon-join-btn');
+            btn.addEventListener('click', () => {
+                const url = getLobbyUrl(gameID);
+
+                navigator.clipboard.writeText(url).catch(err => console.error("Auto-copy failed:", err));
+
+                btn.textContent = 'Copied! Joining...';
+
+                // Change color immediately on click
+                btn.style.setProperty('background', '#2563eb', 'important');
+                btn.style.setProperty('border-color', '#2563eb', 'important');
+
+                setTimeout(() => {
+                    try {
+                        if (typeof window.showPage === 'function') window.showPage('page-join-lobby');
+                        document.dispatchEvent(new CustomEvent('join-lobby', {
+                            detail: { gameID: gameID, source: 'public' },
+                            bubbles: true, composed: true,
+                        }));
+                        return;
+                    } catch (e) { }
+
+                    const joinModal = document.querySelector('join-lobby-modal');
+                    if (joinModal && typeof joinModal.open === 'function') {
+                        try { joinModal.open({ lobbyId: gameID }); return; } catch (e) { }
+                    }
+
+                    window.location.href = url;
+                }, 400);
+            });
+
+            if (isFFA) {
+                ffaColumn.appendChild(card);
+                ffaCount++;
+            } else {
+                teamColumn.appendChild(card);
+                teamCount++;
+            }
+        });
+
+        // Hide titles if there are absolutely no lobbies for that category
+        if (ffaCount === 0) {
+            panel.querySelector('#blon-row-ffa').style.display = 'none';
+        }
+        if (teamCount === 0) {
+            panel.querySelector('#blon-row-team').style.display = 'none';
+        }
+    }
+
+    // --- WebSocket Logic ---
+    function handleLobbySocketMessage(event) {
+        try {
+            const payload = JSON.parse(event.data);
+            if (payload && typeof payload.serverTime === 'number' && payload.games) {
+                lobbyLatestPayload = payload;
+                payloadReceivedAt = Date.now();
+                updateLobbySidePanel();
+            }
+        } catch (e) {
+            console.error('[Blon-FutureLobbies] Feed parse failed', e);
+        }
+    }
+
+    function scheduleLobbyReconnect() {
+        if (!lobbyShouldReconnect || lobbyReconnectTimeout) return;
+        lobbyReconnectTimeout = window.setTimeout(() => {
+            lobbyReconnectTimeout = null;
+            if (lobbyShouldReconnect) connectLobbyFeed();
+        }, 3000);
+    }
+
+    function connectLobbyFeed() {
+        if (lobbyWS) return;
+        lobbyShouldReconnect = true;
+        const workerPath = `/w${Math.floor(Math.random() * getNumWorkers())}`;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}${workerPath}/lobbies`;
+        try {
+            lobbyWS = new WebSocket(url);
+            lobbyWS.addEventListener('open', () => {
+                if (lobbyReconnectTimeout) { clearTimeout(lobbyReconnectTimeout); lobbyReconnectTimeout = null; }
+            });
+            lobbyWS.addEventListener('message', handleLobbySocketMessage);
+            lobbyWS.addEventListener('close', () => {
+                lobbyWS = null;
+                scheduleLobbyReconnect();
+            });
+            lobbyWS.addEventListener('error', () => {
+                lobbyWS = null;
+                scheduleLobbyReconnect();
+            });
+        } catch (e) {
+            lobbyWS = null;
+            scheduleLobbyReconnect();
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', connectLobbyFeed);
+    } else {
+        connectLobbyFeed();
+    }
+
+    // Local loop to update UI timers every 2 seconds without waiting for websocket
+    setInterval(() => {
+        if (lobbyLatestPayload) {
+            updateLobbySidePanel();
+        }
+    }, 500);
+
+    // Mutation observer to handle rapid DOM/URL changes
+    let lastUrl = window.location.href;
+    new MutationObserver(() => {
+        cleanUpAndReformatUI();
+
+        const url = window.location.href;
+        if (url !== lastUrl) {
+            lastUrl = url;
+            updateLobbySidePanel();
+        }
+    }).observe(document, {subtree: true, childList: true});
+
+})();
